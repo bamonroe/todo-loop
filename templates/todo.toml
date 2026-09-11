@@ -1,0 +1,20 @@
+# Managed by todo-loop. Order is priority order; the loop always takes
+# the first incomplete leaf. Dotted ids imply hierarchy (a.b is under a).
+
+[loop]
+running = false
+current = ""
+iterations = 0
+base_commit = ""
+last_failure = ""
+
+[[task]]
+id = "example"
+title = "Replace this with real work"
+status = "todo"
+attempts = 0
+detail = """
+Only leaves are ever handed to the model. Give each leaf a scope one focused
+session can finish — if compaction fires routinely inside a single task, the
+task is too coarse. Split it before reaching for compression.
+"""

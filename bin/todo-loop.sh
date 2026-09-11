@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# The shell driver, in its smallest honest form.
+#
+# One pi process per task, so clearing the context is process exit rather than
+# session bookkeeping. `todo run` does the same thing with verification and
+# checkpointing wired in; this is here because it is easy to read and easy to
+# modify when something goes wrong.
+set -euo pipefail
+
+here="$(dirname "$(readlink -f "$0")")"
+todo="$here/todo"
+max="${TODOLOOP_MAX:-50}"
+
+for ((i = 1; i <= max; i++)); do
+	prompt="$("$todo" next)" || {
+		status=$?
+		[ "$status" -eq 3 ] && { echo "queue empty"; exit 0; }
+		exit "$status"
+	}
+
+	id="$("$todo" next --id)"
+	echo "=== [$i/$max] $id ==="
+	"$todo" start >/dev/null
+
+	pi -p -- "$prompt" || echo "pi exited non-zero; verifying anyway" >&2
+
+	if "$todo" complete "$id"; then
+		continue
+	elif [ $? -eq 4 ]; then
+		echo "rejected; the task stays at the head of the queue" >&2
+	else
+		echo "halted" >&2
+		exit 1
+	fi
+done
+
+echo "stopped after the $max-iteration cap" >&2
+exit 1

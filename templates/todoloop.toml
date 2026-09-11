@@ -1,0 +1,49 @@
+# todo-loop configuration. Every value here has a default; delete what you
+# don't need to change.
+
+[models]
+# The worker. Only the shell driver reads this — in-session the loop uses
+# whatever model the pi session is already on.
+worker = "ollama/qwen3.8-27b:52k"
+# The verifier. Keep it different from the worker: a model judging its own
+# output is the weakest version of this check. The verify call is short, so a
+# smaller model is fine here.
+verifier = "ollama/qwen3.5:9b"
+
+[verify]
+enabled = true
+# Three strikes, then the task is marked blocked and the loop halts. Without a
+# cap, a slightly-too-strict verifier is an unbounded token burn.
+max_attempts = 3
+# Run before the verifier sees anything. A failure here short-circuits the
+# model call entirely — tooling should answer the mechanical questions.
+test_command = ""
+build_command = ""
+require_tests_pass = true
+max_evidence_bytes = 12000
+timeout_ms = 300000
+
+[loop]
+max_iterations = 50
+# commit: auto-commit each verified task. require-clean: refuse to start a task
+# with a dirty tree. off: ignore git entirely.
+checkpoint = "commit"
+commit_prefix = "todo"
+# A run that ends without calling todo_complete never advances the queue.
+# halt: stop and wait for a human. retry: re-issue the task in a fresh session,
+# still bounded by verify.max_attempts.
+on_silent_stop = "halt"
+
+[context]
+# Start eliding old tool results once context passes this fraction of the
+# window. One big edit at a threshold beats trimming every turn: rewriting the
+# middle of the history invalidates the KV cache from the edit point on.
+prune_at_fraction = 0.6
+keep_full_turns = 3
+stub_min_bytes = 2000
+# Cap on how much bash/grep output enters context at all. Pi's built-in 50KB
+# limit is far too generous for a 27B.
+tool_output_max_bytes = 2048
+
+[ollama]
+base_url = "http://localhost:11434/v1"

@@ -1,0 +1,168 @@
+/**
+ * todoloop.toml — every model choice and threshold in one file.
+ * Missing file is fine; the defaults below are the whole contract.
+ */
+
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { parseToml } from "./toml.ts";
+
+export interface Config {
+	models: {
+		/** Worker model, "provider/id". Only used by the shell driver; in-session the loop uses the active model. */
+		worker: string;
+		/** Verifier model. Should differ from the worker — a model judging itself is the weakest version. */
+		verifier: string;
+	};
+	verify: {
+		enabled: boolean;
+		max_attempts: number;
+		test_command: string;
+		build_command: string;
+		require_tests_pass: boolean;
+		max_evidence_bytes: number;
+		timeout_ms: number;
+	};
+	loop: {
+		max_iterations: number;
+		/** commit: auto-commit each verified task. require-clean: refuse to advance with a dirty tree. off: ignore git. */
+		checkpoint: "commit" | "require-clean" | "off";
+		commit_prefix: string;
+		/** What to do when a run ends without the worker calling todo_complete. */
+		on_silent_stop: "halt" | "retry";
+	};
+	context: {
+		/** Start eliding old tool results once context passes this fraction of the window. */
+		prune_at_fraction: number;
+		/** Assistant turns kept verbatim at the tail. */
+		keep_full_turns: number;
+		/** Only tool results at least this large get stubbed. */
+		stub_min_bytes: number;
+		/** Cap on bash/grep output entering context at all. */
+		tool_output_max_bytes: number;
+	};
+	ollama: {
+		base_url: string;
+	};
+}
+
+export const DEFAULT_CONFIG: Config = {
+	models: {
+		worker: "ollama/qwen3.8-27b:52k",
+		verifier: "ollama/qwen3.5:9b",
+	},
+	verify: {
+		enabled: true,
+		max_attempts: 3,
+		test_command: "",
+		build_command: "",
+		require_tests_pass: true,
+		max_evidence_bytes: 12000,
+		timeout_ms: 300000,
+	},
+	loop: {
+		max_iterations: 50,
+		checkpoint: "commit",
+		commit_prefix: "todo",
+		on_silent_stop: "halt",
+	},
+	context: {
+		prune_at_fraction: 0.6,
+		keep_full_turns: 3,
+		stub_min_bytes: 2000,
+		tool_output_max_bytes: 2048,
+	},
+	ollama: {
+		base_url: "http://localhost:11434/v1",
+	},
+};
+
+export const DEFAULT_CONFIG_FILE = "todoloop.toml";
+
+type Plain = Record<string, unknown>;
+
+function pickString(table: Plain, key: string, fallback: string): string {
+	const value = table[key];
+	return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function pickNumber(table: Plain, key: string, fallback: number): number {
+	const value = table[key];
+	return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function pickBool(table: Plain, key: string, fallback: boolean): boolean {
+	const value = table[key];
+	return typeof value === "boolean" ? value : fallback;
+}
+
+function section(doc: Plain, name: string): Plain {
+	const value = doc[name];
+	return value && typeof value === "object" && !Array.isArray(value) ? (value as Plain) : {};
+}
+
+export function parseConfig(text: string): Config {
+	const doc = parseToml(text) as Plain;
+	const models = section(doc, "models");
+	const verify = section(doc, "verify");
+	const loop = section(doc, "loop");
+	const context = section(doc, "context");
+	const ollama = section(doc, "ollama");
+
+	const checkpointRaw = pickString(loop, "checkpoint", DEFAULT_CONFIG.loop.checkpoint);
+	const checkpoint =
+		checkpointRaw === "commit" || checkpointRaw === "require-clean" || checkpointRaw === "off"
+			? checkpointRaw
+			: DEFAULT_CONFIG.loop.checkpoint;
+	const silentRaw = pickString(loop, "on_silent_stop", DEFAULT_CONFIG.loop.on_silent_stop);
+	const on_silent_stop = silentRaw === "retry" ? "retry" : "halt";
+
+	return {
+		models: {
+			worker: pickString(models, "worker", DEFAULT_CONFIG.models.worker),
+			verifier: pickString(models, "verifier", DEFAULT_CONFIG.models.verifier),
+		},
+		verify: {
+			enabled: pickBool(verify, "enabled", DEFAULT_CONFIG.verify.enabled),
+			max_attempts: Math.max(1, pickNumber(verify, "max_attempts", DEFAULT_CONFIG.verify.max_attempts)),
+			test_command: pickString(verify, "test_command", DEFAULT_CONFIG.verify.test_command),
+			build_command: pickString(verify, "build_command", DEFAULT_CONFIG.verify.build_command),
+			require_tests_pass: pickBool(verify, "require_tests_pass", DEFAULT_CONFIG.verify.require_tests_pass),
+			max_evidence_bytes: pickNumber(verify, "max_evidence_bytes", DEFAULT_CONFIG.verify.max_evidence_bytes),
+			timeout_ms: pickNumber(verify, "timeout_ms", DEFAULT_CONFIG.verify.timeout_ms),
+		},
+		loop: {
+			max_iterations: pickNumber(loop, "max_iterations", DEFAULT_CONFIG.loop.max_iterations),
+			checkpoint,
+			commit_prefix: pickString(loop, "commit_prefix", DEFAULT_CONFIG.loop.commit_prefix),
+			on_silent_stop,
+		},
+		context: {
+			prune_at_fraction: pickNumber(context, "prune_at_fraction", DEFAULT_CONFIG.context.prune_at_fraction),
+			keep_full_turns: pickNumber(context, "keep_full_turns", DEFAULT_CONFIG.context.keep_full_turns),
+			stub_min_bytes: pickNumber(context, "stub_min_bytes", DEFAULT_CONFIG.context.stub_min_bytes),
+			tool_output_max_bytes: pickNumber(
+				context,
+				"tool_output_max_bytes",
+				DEFAULT_CONFIG.context.tool_output_max_bytes,
+			),
+		},
+		ollama: {
+			base_url: pickString(ollama, "base_url", DEFAULT_CONFIG.ollama.base_url),
+		},
+	};
+}
+
+export function loadConfig(cwd: string, file?: string): Config {
+	const target = file ?? process.env.TODOLOOP_CONFIG ?? DEFAULT_CONFIG_FILE;
+	const resolved = path.isAbsolute(target) ? target : path.join(cwd, target);
+	if (!fs.existsSync(resolved)) return DEFAULT_CONFIG;
+	return parseConfig(fs.readFileSync(resolved, "utf8"));
+}
+
+/** Split "provider/model:variant" into provider and model id. */
+export function splitModelRef(ref: string): { provider: string; model: string } {
+	const cut = ref.indexOf("/");
+	if (cut < 0) return { provider: "ollama", model: ref };
+	return { provider: ref.slice(0, cut), model: ref.slice(cut + 1) };
+}

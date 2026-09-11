@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Thin launcher so `todo` works without an install step.
+exec node --experimental-strip-types "$(dirname "$(readlink -f "$0")")/../src/cli.ts" "$@"

@@ -1,0 +1,22 @@
+{
+	"name": "todo-loop",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Autonomous todo loop for the pi coding agent: one task per session, verified before it closes.",
+	"type": "module",
+	"bin": {
+		"todo": "./bin/todo"
+	},
+	"scripts": {
+		"test": "node --test test/"
+	},
+	"engines": {
+		"node": ">=22.18"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "^0.85.1",
+		"@types/node": "^22.20.2",
+		"typebox": "^1.3.30",
+		"typescript": "^7.0.2"
+	}
+}
