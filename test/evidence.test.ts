@@ -42,6 +42,10 @@ test("uncommitted edits and new files both show up", async () => {
 	assert.match(diff, /uncommitted working tree/);
 	assert.match(diff, /host = 'localhost'/);
 	assert.match(diff, /untracked files/);
+	// The contents of a new file must actually reach the verifier: new files are
+	// the most common result of a task, and "binary or unreadable" tells it nothing.
+	assert.match(diff, /\+\+\+ b\/health\.ts/);
+	assert.match(diff, /\+export const health = \(\) => 'ok';/);
 	assert.deepEqual(files.sort(), ["health.ts", "server.ts"]);
 	assert.deepEqual((await changedFiles(repo, base)).sort(), ["health.ts", "server.ts"]);
 });
@@ -126,5 +130,14 @@ test("the queue and its config are kept out of the evidence", async () => {
 	assert.equal(withWork.dirty, true);
 	assert.deepEqual(await changedFiles(scratch, ""), ["greet.ts"]);
 
+	fs.rmSync(scratch, { recursive: true, force: true });
+});
+
+test("a binary new file is named rather than dumped", async () => {
+	const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "todo-loop-binary-"));
+	execFileSync("git", ["init", "-q"], { cwd: scratch });
+	fs.writeFileSync(path.join(scratch, "blob.bin"), Buffer.from([0x00, 0x01, 0x02, 0x00]));
+	const { diff } = await collectDiff(scratch, "", 10000);
+	assert.match(diff, /new file blob\.bin \(binary, 4 bytes\)/);
 	fs.rmSync(scratch, { recursive: true, force: true });
 });

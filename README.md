@@ -189,6 +189,7 @@ matter most:
 todo init                      Write todoloop.toml and todo.toml starters
 todo doctor [--probe]          Check models, VRAM, git and queue shape
 todo status                    Show the queue
+todo stop                      Stop a running loop after the current task
 todo next [--id]               Print the next task's prompt (exit 3 when empty)
 todo start                     Claim the next task and print its prompt
 todo add <id> <title...>       Append a task (--detail "...", --parent <id>)

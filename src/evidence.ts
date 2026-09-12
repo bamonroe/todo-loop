@@ -8,6 +8,8 @@
  */
 
 import { execFile } from "node:child_process";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
@@ -41,6 +43,33 @@ export function truncateHead(text: string, maxBytes: number): string {
 	if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
 	const slice = Buffer.from(text, "utf8").subarray(0, maxBytes).toString("utf8");
 	return `${slice}\n[... truncated after ${maxBytes} bytes ...]`;
+}
+
+const MAX_NEW_FILES = 20;
+
+/**
+ * A synthetic diff for a file git has never seen.
+ *
+ * `git diff --no-index` exits non-zero whenever the files differ, which is
+ * always the case here, so routing it through the helper below silently
+ * produced empty output — and new files are the single most common result of a
+ * task. Reading the file directly avoids the whole question.
+ */
+async function newFileDiff(cwd: string, file: string, maxBytes: number): Promise<string> {
+	let contents: Buffer;
+	try {
+		contents = await fs.readFile(path.join(cwd, file));
+	} catch {
+		return `# new file ${file} (unreadable)`;
+	}
+	if (contents.includes(0)) return `# new file ${file} (binary, ${contents.length} bytes)`;
+
+	const body = contents
+		.toString("utf8")
+		.split("\n")
+		.map((line) => `+${line}`)
+		.join("\n");
+	return `--- /dev/null\n+++ b/${file}\n${truncateHead(body, maxBytes)}`;
 }
 
 async function git(cwd: string, args: string[], maxBuffer = 8 * 1024 * 1024): Promise<string> {
@@ -119,11 +148,13 @@ export async function collectDiff(
 	for (const file of untracked) files.add(file);
 	if (untracked.length) {
 		const shown: string[] = [];
-		for (const file of untracked.slice(0, 20)) {
-			const body = await git(cwd, ["diff", "--no-index", "--", "/dev/null", file]);
-			shown.push(body || `# new file ${file} (binary or unreadable)`);
+		for (const file of untracked.slice(0, MAX_NEW_FILES)) {
+			shown.push(await newFileDiff(cwd, file, maxBytes));
 		}
-		parts.push(`# new untracked files\n${shown.join("\n")}`);
+		if (untracked.length > MAX_NEW_FILES) {
+			shown.push(`# ${untracked.length - MAX_NEW_FILES} further new files not shown`);
+		}
+		parts.push(`# new untracked files\n${shown.join("\n\n")}`);
 	}
 
 	// Dirtiness is about the task's own work, so it ignores the excluded paths too.

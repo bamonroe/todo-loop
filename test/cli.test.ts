@@ -113,3 +113,23 @@ test("unknown commands report usage", async () => {
 	assert.equal(result.code, 1);
 	assert.match(result.stderr, /unknown command/);
 });
+
+test("a BLOCKED declaration is recognised in the worker's output", async () => {
+	const { findBlockMarker } = await import("../src/cli.ts");
+	assert.equal(
+		findBlockMarker("I looked at the code.\nBLOCKED: the spec contradicts the existing schema"),
+		"the spec contradicts the existing schema",
+	);
+	assert.equal(findBlockMarker("**BLOCKED**: no such module"), "no such module");
+	assert.equal(findBlockMarker("Added greet.ts and a test. All good."), undefined);
+	assert.equal(findBlockMarker("It is not blocked: everything worked"), undefined);
+	// The last declaration wins, so a worker that changes its mind is honoured.
+	assert.equal(findBlockMarker("BLOCKED: first guess\nActually:\nBLOCKED: the real reason"), "the real reason");
+});
+
+test("stop halts the loop between tasks", async () => {
+	const store = path.join(workspace, "todo.toml");
+	fs.writeFileSync(store, fs.readFileSync(store, "utf8").replace("running = false", "running = true"));
+	assert.equal((await todo("stop")).code, 0);
+	assert.equal(loadStore(store).loop.running, false);
+});

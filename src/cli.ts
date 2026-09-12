@@ -116,6 +116,7 @@ const USAGE = `todo — autonomous todo loop for pi
   todo init                      Write ${DEFAULT_CONFIG_FILE} and ${DEFAULT_STORE_FILE} starters
   todo doctor [--probe]          Check models, VRAM, git and queue shape
   todo status                    Show the queue
+  todo stop                      Stop a running loop after the current task
   todo next [--id]               Print the next task's prompt (exit 3 when empty)
   todo start                     Claim the next task and print its prompt
   todo add <id> <title...>       Append a task (--detail "...", --parent <id>)
@@ -166,6 +167,14 @@ function commandStatus(env: Env): number {
 			` · iteration ${env.store.loop.iterations}`,
 	);
 	if (env.store.loop.last_failure) console.log(`last failure: ${env.store.loop.last_failure}`);
+	return EXIT_OK;
+}
+
+/** The driver re-reads todo.toml every iteration, so this stops it between tasks. */
+function commandStop(env: Env): number {
+	env.store.loop.running = false;
+	saveStore(env.storeFile, env.store);
+	console.log("loop will stop after the current task");
 	return EXIT_OK;
 }
 
@@ -320,10 +329,22 @@ async function commandCheckpoint(env: Env, flags: Flags): Promise<number> {
 	return EXIT_OK;
 }
 
-function runPi(env: Env, prompt: string, dryRun: boolean): Promise<number> {
+/** A worker that cannot do the task as written says so rather than guessing. */
+export function findBlockMarker(output: string): string | undefined {
+	const matches = [...output.matchAll(/^\s*(?:\*\*)?BLOCKED(?:\*\*)?:\s*(.+)$/gim)];
+	const last = matches.at(-1);
+	return last ? last[1].trim() : undefined;
+}
+
+interface PiRun {
+	code: number;
+	output: string;
+}
+
+function runPi(env: Env, prompt: string, dryRun: boolean): Promise<PiRun> {
 	if (dryRun) {
 		console.log(`--- would run pi with prompt ---\n${prompt}\n--- end prompt ---`);
-		return Promise.resolve(0);
+		return Promise.resolve({ code: 0, output: "" });
 	}
 	// pi reads a trailing `:suffix` on --model as a thinking level, so an ollama
 	// tag like `qwen3.8-27b:52k` cannot round-trip through the flag. Inheriting
@@ -337,12 +358,19 @@ function runPi(env: Env, prompt: string, dryRun: boolean): Promise<number> {
 	return new Promise((resolve) => {
 		// stdin must be closed: pi's print mode waits for EOF before it runs the
 		// prompt, so an inherited pipe makes it hang with the model loaded and idle.
-		const child = spawn("pi", args, { cwd: env.cwd, stdio: ["ignore", "inherit", "inherit"] });
+		// stdout is piped so the run can be read for a BLOCKED marker, and echoed
+		// so it still streams.
+		const child = spawn("pi", args, { cwd: env.cwd, stdio: ["ignore", "pipe", "inherit"] });
+		let output = "";
+		child.stdout?.on("data", (chunk: Buffer) => {
+			output += chunk.toString();
+			process.stdout.write(chunk);
+		});
 		child.on("error", (error) => {
 			console.error(`failed to launch pi: ${error.message}`);
-			resolve(127);
+			resolve({ code: 127, output });
 		});
-		child.on("close", (code) => resolve(code ?? EXIT_ERROR));
+		child.on("close", (code) => resolve({ code: code ?? EXIT_ERROR, output }));
 	});
 }
 
@@ -388,12 +416,22 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 		});
 
 		console.log(`\n=== [${iteration}/${maxIterations}] ${task.id}: ${task.title} ===`);
-		const code = await runPi(env, prompt, dryRun);
-		if (code !== 0) console.error(`pi exited ${code}; verifying anyway`);
+		const result = await runPi(env, prompt, dryRun);
+		if (result.code !== 0) console.error(`pi exited ${result.code}; verifying anyway`);
 
 		env.store = loadStore(env.storeFile);
 		const current = findTask(env.store, task.id);
 		if (!current) continue;
+
+		// A declared blocker is a claim about the task, not the diff, so it is
+		// taken at face value rather than sent to the verifier.
+		const blocker = findBlockMarker(result.output);
+		if (blocker) {
+			markBlocked(env.store, current, blocker);
+			saveStore(env.storeFile, env.store);
+			console.error(`⊘ ${current.id} blocked by the worker: ${blocker}`);
+			return EXIT_ERROR;
+		}
 
 		const verdict = dryRun ? { pass: true, reason: "dry run" } : await verifyTask(env, current);
 		if (verdict.pass) {
@@ -439,6 +477,8 @@ export async function main(argv: string[]): Promise<number> {
 			return commandStatus(env);
 		case "doctor":
 			return commandDoctor(env, flags);
+		case "stop":
+			return commandStop(env);
 		case "next":
 			return commandNext(env, flags);
 		case "start":
