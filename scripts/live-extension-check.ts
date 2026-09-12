@@ -58,7 +58,7 @@ Plain TypeScript, type annotations only, run directly by node. No test file need
 const CONFIG = `
 [models]
 worker = "inherit"
-verifier = "ollama/qwen3.5:9b"
+verifier = "opencode/qwen3.6-plus"
 
 [verify]
 enabled = true

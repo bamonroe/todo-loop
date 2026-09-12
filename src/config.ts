@@ -18,7 +18,13 @@ export interface Config {
 		 * it. "inherit" sidesteps that entirely.
 		 */
 		worker: string;
-		/** Verifier model. Should differ from the worker — a model judging itself is the weakest version. */
+		/**
+		 * Verifier model. Should differ from the worker — a model judging itself is
+		 * the weakest version of this check.
+		 *
+		 * A hosted model is usually the right answer on a single GPU: a local
+		 * verifier evicts the worker on every task. See src/providers.ts.
+		 */
 		verifier: string;
 	};
 	verify: {
@@ -56,7 +62,7 @@ export interface Config {
 export const DEFAULT_CONFIG: Config = {
 	models: {
 		worker: "inherit",
-		verifier: "ollama/qwen3.5:9b",
+		verifier: "opencode/qwen3.6-plus",
 	},
 	verify: {
 		enabled: true,

@@ -46,7 +46,8 @@ import {
 	type Store,
 	type Task,
 } from "../src/store.ts";
-import { ollamaCompleter, verify, type Completer, type Verdict } from "../src/verify.ts";
+import { completerFor } from "../src/providers.ts";
+import { verify, type Completer, type Verdict } from "../src/verify.ts";
 
 /** Tools whose output is bulky enough to be worth capping before it enters context. */
 const BULKY_TOOLS = new Set(["bash", "grep", "rg", "glob", "list", "read", "web_fetch"]);
@@ -104,7 +105,9 @@ export default function (pi: ExtensionAPI) {
 		const { provider, model: modelId } = splitModelRef(config.models.verifier);
 		const model = ctx.modelRegistry.find(provider, modelId);
 		if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) {
-			return ollamaCompleter(config.ollama.base_url, modelId, signal);
+			// pi does not know this model, or has no credentials for it. Fall back to
+			// talking to the provider directly rather than silently skipping the check.
+			return completerFor(config.models.verifier, config, signal);
 		}
 		return async ({ system, user }) => {
 			const response = await ctx.modelRegistry.complete(

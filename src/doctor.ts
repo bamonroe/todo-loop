@@ -5,7 +5,8 @@
  * The one that matters most on a single GPU: if the worker and the verifier
  * cannot be resident at the same time, every verification evicts the worker and
  * every following task reloads it. That is two model loads per task, and on a
- * 16GB card with a 27B worker it dominates everything else.
+ * 16GB card with a 27B worker it dominates everything else. A hosted verifier
+ * sidesteps it, at the cost of sending the diff off the machine.
  */
 
 import { execFile } from "node:child_process";
@@ -13,6 +14,7 @@ import { promisify } from "node:util";
 import type { Config } from "./config.ts";
 import { inheritsWorker, piDefaultModel, splitModelRef } from "./config.ts";
 import { isGitRepo, isTreeClean } from "./evidence.ts";
+import { endpointFor, REMOTE_PROVIDERS, type Endpoint } from "./providers.ts";
 import { counts, findTask, isLeaf, nextLeaf, parentOf, type Store } from "./store.ts";
 
 const run = promisify(execFile);
@@ -62,22 +64,30 @@ function gb(bytes: number): string {
 }
 
 /** Measure a real round trip, so "the verifier is slow" is a number and not a feeling. */
-export async function probeLatency(baseUrl: string, model: string): Promise<{ ms: number; error?: string }> {
+export async function probeLatency(endpoint: Endpoint): Promise<{ ms: number; error?: string }> {
+	if (endpoint.problem) return { ms: 0, error: endpoint.problem };
 	const started = Date.now();
 	try {
-		const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+		const response = await fetch(`${endpoint.baseUrl.replace(/\/$/, "")}/chat/completions`, {
 			method: "POST",
-			headers: { "content-type": "application/json", authorization: "Bearer ollama" },
+			headers: {
+				"content-type": "application/json",
+				authorization: `Bearer ${endpoint.apiKey}`,
+				...endpoint.headers,
+			},
 			body: JSON.stringify({
-				model,
+				model: endpoint.model,
 				temperature: 0,
 				stream: false,
-				max_tokens: 16,
+				max_tokens: endpoint.maxTokens ?? 16,
 				messages: [{ role: "user", content: 'Reply with exactly: {"pass": true, "reason": "probe"}' }],
 			}),
 			signal: AbortSignal.timeout(600000),
 		});
-		if (!response.ok) return { ms: Date.now() - started, error: `${response.status} ${response.statusText}` };
+		if (!response.ok) {
+			const detail = (await response.text().catch(() => "")).slice(0, 200);
+			return { ms: Date.now() - started, error: `${response.status} ${response.statusText}${detail ? `: ${detail}` : ""}` };
+		}
 		await response.json();
 		return { ms: Date.now() - started };
 	} catch (error) {
@@ -168,6 +178,15 @@ export async function diagnose(options: DoctorOptions): Promise<Check[]> {
 	const checks: Check[] = [];
 
 	const models = await listOllamaModels(config.ollama.base_url);
+	const findLocal = (name: string) =>
+		models?.find((entry) => entry.name === name || entry.name === `${name}:latest`);
+
+	const inherited = inheritsWorker(config);
+	const workerRef = inherited ? piDefaultModel() : config.models.worker;
+	const worker = workerRef ? splitModelRef(workerRef).model : "";
+	const verifierEndpoint = endpointFor(config.models.verifier, config);
+
+	// The worker is always local, so ollama has to be up even when the verifier is not.
 	if (!models) {
 		checks.push({
 			level: "fail",
@@ -177,50 +196,69 @@ export async function diagnose(options: DoctorOptions): Promise<Check[]> {
 	} else {
 		checks.push({ level: "ok", label: "ollama", detail: `${models.length} models at ${config.ollama.base_url}` });
 
-		const inherited = inheritsWorker(config);
-		const workerRef = inherited ? piDefaultModel() : config.models.worker;
-		if (inherited) {
+		if (!worker) {
 			checks.push({
-				level: workerRef ? "ok" : "warn",
+				level: "warn",
 				label: "worker model",
-				detail: workerRef
-					? `inherited from pi settings: ${workerRef}`
-					: "set to inherit, but pi has no defaultModel configured",
+				detail: inherited
+					? "set to inherit, but pi has no defaultModel configured"
+					: "no worker model configured",
 			});
-		}
-		const worker = workerRef ? splitModelRef(workerRef).model : "";
-		const verifier = splitModelRef(config.models.verifier).model;
-		const find = (name: string) => models.find((entry) => entry.name === name || entry.name === `${name}:latest`);
-
-		const roles: [string, string][] = inherited ? [["verifier", verifier]] : [["worker", worker], ["verifier", verifier]];
-		for (const [role, name] of roles) {
-			if (!name) continue;
-			const found = find(name);
+		} else {
+			const found = findLocal(worker);
+			const origin = inherited ? ", inherited from pi settings" : "";
 			checks.push(
 				found
-					? { level: "ok", label: `${role} model`, detail: `${name} (${gb(found.size)})` }
-					: { level: "fail", label: `${role} model`, detail: `${name} is not pulled — run: ollama pull ${name}` },
+					? { level: "ok", label: "worker model", detail: `${worker} (${gb(found.size)})${origin}` }
+					: { level: "fail", label: "worker model", detail: `${worker} is not pulled — run: ollama pull ${worker}` },
 			);
 		}
 
-		if (!inherited && /:[^:]+$/.test(config.models.worker) && !find(worker)) {
+		if (!inherited && /:[^:]+$/.test(config.models.worker) && !findLocal(worker)) {
 			checks.push({
 				level: "warn",
 				label: "worker model reference",
 				detail: `pi reads the ":" suffix in ${config.models.worker} as a thinking level, so --model will not resolve it; use "inherit" instead`,
 			});
 		}
+	}
 
-		if (worker && worker === verifier) {
-			checks.push({
-				level: "warn",
-				label: "verifier independence",
-				detail: "worker and verifier are the same model; a model judging its own output is the weakest version of this check",
-			});
-		}
+	if (worker && !verifierEndpoint.remote && worker === verifierEndpoint.model) {
+		checks.push({
+			level: "warn",
+			label: "verifier independence",
+			detail: "worker and verifier are the same model; a model judging its own output is the weakest version of this check",
+		});
+	}
 
-		const workerEntry = find(worker);
-		const verifierEntry = find(verifier);
+	if (verifierEndpoint.remote) {
+		const label = REMOTE_PROVIDERS[verifierEndpoint.provider]?.label ?? verifierEndpoint.provider;
+		checks.push(
+			verifierEndpoint.problem
+				? { level: "fail", label: "verifier model", detail: verifierEndpoint.problem }
+				: {
+						level: "ok",
+						label: "verifier model",
+						detail: `${verifierEndpoint.model} via ${label} — hosted, so it never competes with the worker for VRAM`,
+					},
+		);
+		checks.push({
+			level: "warn",
+			label: "evidence leaves this machine",
+			detail:
+				`the task text, changed file list and diff go to ${label} on every verification, and the call is metered. ` +
+				"Set models.verifier to an ollama model to keep everything local.",
+		});
+	} else if (models) {
+		const verifier = verifierEndpoint.model;
+		const verifierEntry = findLocal(verifier);
+		checks.push(
+			verifierEntry
+				? { level: "ok", label: "verifier model", detail: `${verifier} (${gb(verifierEntry.size)})` }
+				: { level: "fail", label: "verifier model", detail: `${verifier} is not pulled — run: ollama pull ${verifier}` },
+		);
+
+		const workerEntry = findLocal(worker);
 		const vram = await totalVramBytes();
 		if (workerEntry && verifierEntry && vram) {
 			const combined = workerEntry.size + verifierEntry.size;
@@ -237,7 +275,8 @@ export async function diagnose(options: DoctorOptions): Promise<Check[]> {
 							detail:
 								`${gb(combined)} needed but only ${gb(vram)} available — every verification evicts the worker, ` +
 								"so expect two model loads per task. Either accept the cost, pick a verifier small enough to co-reside, " +
-								"or drop the worker to a smaller context variant to free KV cache.",
+								"drop the worker to a smaller context variant to free KV cache, or move the verifier off the box " +
+								'(models.verifier = "opencode/qwen3.6-plus").',
 						},
 			);
 		}
@@ -274,9 +313,8 @@ export async function diagnose(options: DoctorOptions): Promise<Check[]> {
 
 	checks.push(...auditQueue(store));
 
-	if (options.probe && models) {
-		const verifier = splitModelRef(config.models.verifier).model;
-		const result = await probeLatency(config.ollama.base_url, verifier);
+	if (options.probe) {
+		const result = await probeLatency(verifierEndpoint);
 		checks.push(
 			result.error
 				? { level: "fail", label: "verifier probe", detail: `${result.error} after ${result.ms}ms` }
@@ -284,7 +322,7 @@ export async function diagnose(options: DoctorOptions): Promise<Check[]> {
 						level: result.ms > 30000 ? "warn" : "ok",
 						label: "verifier probe",
 						detail:
-							`${(result.ms / 1000).toFixed(1)}s round trip` +
+							`${(result.ms / 1000).toFixed(1)}s round trip to ${verifierEndpoint.model}` +
 							(result.ms > 30000 ? " — most of this is model load, and you pay it once per task" : ""),
 					},
 		);

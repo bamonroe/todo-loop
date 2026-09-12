@@ -11,12 +11,24 @@
 worker = "inherit"
 # The verifier. Keep it different from the worker: a model judging its own
 # output is the weakest version of this check. The verify call is short, so a
-# smaller model is fine here.
+# small model is fine here.
 #
-# On a single GPU, check `todo doctor` first: if the worker and verifier cannot
-# both stay resident, every verification evicts the worker and you pay two model
-# loads per task.
-verifier = "ollama/qwen3.5:9b"
+# Two shapes work:
+#
+#   opencode/<model>     hosted on OpenCode Zen
+#   opencode-go/<model>  hosted on OpenCode Go
+#   ollama/<model>       local, and nothing leaves the machine
+#
+# Hosted is usually right on a single GPU. A local verifier has to share VRAM
+# with the worker, and if they do not both fit, every verification evicts the
+# worker and you pay two model loads per task — run `todo doctor` to see whether
+# yours fit. The cost of going hosted is that the task text, the changed file
+# list and the diff are sent to the provider, and the call is metered.
+#
+# Hosted keys come from OPENCODE_API_KEY, or from whatever `pi` already stored
+# in ~/.pi/agent/auth.json. Nothing extra to configure if `pi auth check
+# --provider opencode` already says ready.
+verifier = "opencode/qwen3.6-plus"
 
 [verify]
 enabled = true

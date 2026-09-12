@@ -97,27 +97,63 @@ export async function verify(task: VerifyTask, evidence: Evidence, complete: Com
 	return verdict;
 }
 
-/** Completer backed by an OpenAI-compatible endpoint — Ollama by default. */
-export function ollamaCompleter(baseUrl: string, model: string, signal?: AbortSignal): Completer {
+/** Everything needed to reach one OpenAI-compatible chat endpoint. */
+export interface ChatEndpoint {
+	baseUrl: string;
+	model: string;
+	apiKey: string;
+	/** Provider-specific extras, e.g. opencode-go's required session header. */
+	headers?: Record<string, string>;
+	/**
+	 * Left unset for local servers, where an unbounded reply costs nothing but
+	 * time. Set it for metered endpoints, and set it generously: on a reasoning
+	 * model the thinking tokens come out of the same budget as the verdict.
+	 */
+	maxTokens?: number;
+	signal?: AbortSignal;
+}
+
+/** Completer backed by an OpenAI-compatible chat endpoint. */
+export function chatCompleter(endpoint: ChatEndpoint): Completer {
 	return async ({ system, user }) => {
-		const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+		const body: Record<string, unknown> = {
+			model: endpoint.model,
+			temperature: 0,
+			stream: false,
+			messages: [
+				{ role: "system", content: system },
+				{ role: "user", content: user },
+			],
+		};
+		if (endpoint.maxTokens) body.max_tokens = endpoint.maxTokens;
+
+		const response = await fetch(`${endpoint.baseUrl.replace(/\/$/, "")}/chat/completions`, {
 			method: "POST",
-			headers: { "content-type": "application/json", authorization: "Bearer ollama" },
-			body: JSON.stringify({
-				model,
-				temperature: 0,
-				stream: false,
-				messages: [
-					{ role: "system", content: system },
-					{ role: "user", content: user },
-				],
-			}),
-			signal,
+			headers: {
+				"content-type": "application/json",
+				authorization: `Bearer ${endpoint.apiKey}`,
+				...endpoint.headers,
+			},
+			body: JSON.stringify(body),
+			signal: endpoint.signal,
 		});
 		if (!response.ok) {
-			throw new Error(`${response.status} ${response.statusText} from ${baseUrl}`);
+			// The body carries the useful part — "model is unavailable" beats "400".
+			const detail = (await response.text().catch(() => "")).slice(0, 300);
+			throw new Error(`${response.status} ${response.statusText} from ${endpoint.baseUrl}${detail ? `: ${detail}` : ""}`);
 		}
-		const body = (await response.json()) as { choices?: { message?: { content?: string } }[] };
-		return body.choices?.[0]?.message?.content ?? "";
+		const payload = (await response.json()) as {
+			choices?: { message?: { content?: string; reasoning_content?: string } }[];
+		};
+		const message = payload.choices?.[0]?.message;
+		// Reasoning models that hit the token cap mid-thought leave content empty
+		// but the verdict visible in reasoning_content. Rescue it rather than
+		// failing closed on a task that may well be fine.
+		return message?.content?.trim() ? message.content : (message?.reasoning_content ?? "");
 	};
+}
+
+/** Completer backed by a local Ollama server. */
+export function ollamaCompleter(baseUrl: string, model: string, signal?: AbortSignal): Completer {
+	return chatCompleter({ baseUrl, model, apiKey: "ollama", signal });
 }

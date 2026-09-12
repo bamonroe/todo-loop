@@ -31,7 +31,8 @@ import {
 	type Store,
 	type Task,
 } from "./store.ts";
-import { ollamaCompleter, verify, type Verdict } from "./verify.ts";
+import { completerFor } from "./providers.ts";
+import { verify, type Verdict } from "./verify.ts";
 
 const EXIT_OK = 0;
 const EXIT_ERROR = 1;
@@ -89,8 +90,7 @@ function loadEnv(flags: Flags): Env {
 }
 
 function verifierFor(env: Env, signal?: AbortSignal) {
-	const { model } = splitModelRef(env.config.models.verifier);
-	return ollamaCompleter(env.config.ollama.base_url, model, signal);
+	return completerFor(env.config.models.verifier, env.config, signal);
 }
 
 async function evidenceFor(env: Env) {

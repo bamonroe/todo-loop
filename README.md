@@ -31,35 +31,62 @@ required to use the loop.
 ## Check the setup first
 
 `todo doctor` answers the questions that are cheaper to ask now than to discover
-halfway through an overnight run: is Ollama up, are both models pulled, is this
-a git repository, and does the queue have a runnable leaf. Add `--probe` to
-measure a real verifier round trip.
+halfway through an overnight run: is Ollama up, is the worker pulled, can the
+verifier actually be reached with the credentials on this machine, is this a git
+repository, and does the queue have a runnable leaf. Add `--probe` to measure a
+real verifier round trip.
 
-The check worth reading carefully is VRAM:
+## Where the verifier runs
+
+`models.verifier` takes one of three shapes:
+
+```toml
+verifier = "opencode/qwen3.6-plus"     # hosted on OpenCode Zen (default)
+verifier = "opencode-go/qwen3.8-flash" # hosted on OpenCode Go
+verifier = "ollama/qwen3.5:9b"         # local, nothing leaves the machine
+```
+
+Hosted keys are read from `OPENCODE_API_KEY`, or from whatever `pi` already
+stored in `~/.pi/agent/auth.json`. If `pi auth check --provider opencode` says
+`ready`, there is nothing else to configure. In-session, the extension resolves
+the model through pi's own registry first and only falls back to calling the
+provider directly.
+
+The choice is a genuine trade, and `todo doctor` states both sides of it.
+
+**Local** keeps the diff on your machine, but the verifier has to share VRAM
+with the worker:
 
 ```
 ! vram: 18.5GB needed but only 17.2GB available — every verification evicts the
   worker, so expect two model loads per task.
 ```
 
-On a single GPU this is the dominant cost. A 27B worker and a 9B verifier do not
+On a single GPU that is the dominant cost. A 27B worker and a 9B verifier do not
 both fit in 16GB, so each verification swaps the worker out and the next task
-swaps it back in. Measured here, a verifier call that generates a hundred tokens
-takes about 150 seconds, nearly all of it model load.
+swaps it back in. Measured here, a local verifier call that generates a hundred
+tokens takes about 150 seconds, nearly all of it model load.
 
-That is a real trade, not a bug. Independent judgement costs two model loads per
-task. Your options, in order of how much they give up:
+**Hosted** removes the contention entirely — the worker never leaves VRAM, and
+the same call takes about six seconds. The price is that the task text, the
+changed file list and the diff are sent to the provider on every verification,
+and the call is metered. `doctor` says so out loud rather than leaving it
+implicit:
 
-1. **Accept it.** Verification is per task, not per turn. Two minutes on a task
-   that took twenty is noise, and this is the only option that keeps the
-   verifier genuinely independent.
-2. **Shrink the worker's context.** KV cache is real VRAM. Dropping the worker
-   from a 52k to a 16k context variant can free enough for a small verifier to
-   stay resident — and if tasks are scoped tightly enough, 16k is plenty.
-3. **Use the same model as its own verifier.** Cheapest and weakest. It still
-   catches empty diffs and failing tests, because those are answered by tooling
-   before the model is asked anything, but it will wave through work that is
-   merely adjacent to the task.
+```
+! evidence leaves this machine: the task text, changed file list and diff go to
+  OpenCode Zen on every verification, and the call is metered.
+```
+
+If neither suits, there are two cheaper local options:
+
+- **Shrink the worker's context.** KV cache is real VRAM. Dropping the worker
+  from a 52k to a 16k context variant can free enough for a small verifier to
+  stay resident — and if tasks are scoped tightly enough, 16k is plenty.
+- **Use the same model as its own verifier.** Cheapest and weakest. It still
+  catches empty diffs and failing tests, because those are answered by tooling
+  before the model is asked anything, but it will wave through work that is
+  merely adjacent to the task.
 
 ## Two ways to run it
 
@@ -174,8 +201,9 @@ matter most:
   extension always uses the active session model and ignores this setting.
 - `models.verifier` — keep it different from the worker. A model judging its own
   output is the weakest version of this check, and the verify call is short
-  enough that a smaller model is fine. Check `todo doctor` for the VRAM trade
-  before choosing.
+  enough that a small model is fine. Defaults to `opencode/qwen3.6-plus`; see
+  [Where the verifier runs](#where-the-verifier-runs) for the local option and
+  what each choice costs.
 - `verify.test_command` / `verify.build_command` — the more tooling answers, the
   less the verifier has to.
 - `verify.max_attempts` — the cap that stops a slightly-too-strict verifier from
@@ -208,14 +236,15 @@ rejected.
 ## Tests
 
 ```bash
-node --test test/      # 79 tests, no model required
+node --test test/      # 91 tests, no model required
 npx tsc                # type-checks src, extension and tests
 ```
 
 The suite covers the TOML round-trip, leaf selection and roll-up, prompt
 rendering, git evidence collection against a real temporary repository, the
 verdict parser against the shapes local models actually emit, queue-shape
-auditing, and the CLI end to end in `--dry-run`.
+auditing, provider resolution and credential lookup against a stub endpoint, and
+the CLI end to end in `--dry-run`.
 
 There is also a live check that needs a running model:
 
@@ -235,9 +264,13 @@ run ending without `todo_complete` halts rather than advancing, and that the
 pruning, truncation and compaction hooks stay out of the way when the loop is
 not running.
 
-Separately, the verifier has been exercised against a live local model
-(`qwen3.5:9b` on Ollama). Given a diff that adds the requested `/health` route
-it returns `pass`; given a diff that adds a `/version` route instead — plausible
-work that is not the task — it returns `fail` and names the gap. That is the
-discrimination the whole design rests on, so it is worth re-running on your own
-models before trusting a long queue to it.
+Separately, the verifier has been exercised against live models — `qwen3.5:9b`
+on Ollama and `qwen3.6-plus` on OpenCode Zen. Given a diff that adds the
+requested `/health` route both return `pass`; given a diff that adds a
+`/version` route instead — plausible work that is not the task — both return
+`fail` and name the gap. That is the discrimination the whole design rests on,
+so it is worth re-running on your own models before trusting a long queue to it.
+
+The round trip differs by two orders of magnitude. The hosted verifier answers
+in about 3 seconds; the local one takes about 150, almost all of it evicting and
+reloading the worker.
