@@ -100,3 +100,31 @@ test("a non-git directory degrades instead of throwing", async () => {
 	assert.equal(files.length, 0);
 	fs.rmSync(plain, { recursive: true, force: true });
 });
+
+test("the queue and its config are kept out of the evidence", async () => {
+	const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "todo-loop-exclude-"));
+	execFileSync("git", ["init", "-q"], { cwd: scratch });
+	execFileSync("git", ["config", "user.email", "t@e.com"], { cwd: scratch });
+	execFileSync("git", ["config", "user.name", "T"], { cwd: scratch });
+	fs.writeFileSync(path.join(scratch, "README.md"), "scratch\n");
+	execFileSync("git", ["add", "-A"], { cwd: scratch });
+	execFileSync("git", ["commit", "-qm", "initial"], { cwd: scratch });
+
+	// Only the loop's own bookkeeping changed — that must not read as work done.
+	fs.writeFileSync(path.join(scratch, "todo.toml"), "[loop]\nrunning = true\n");
+	fs.writeFileSync(path.join(scratch, "todoloop.toml"), "[models]\nworker = \"inherit\"\n");
+
+	const bookkeepingOnly = await collectDiff(scratch, "", 10000);
+	assert.equal(bookkeepingOnly.diff, "(no changes)");
+	assert.equal(bookkeepingOnly.files.length, 0);
+	assert.equal(bookkeepingOnly.dirty, false);
+
+	fs.writeFileSync(path.join(scratch, "greet.ts"), "export const greet = () => 'hi';\n");
+	const withWork = await collectDiff(scratch, "", 10000);
+	assert.deepEqual(withWork.files, ["greet.ts"]);
+	assert.doesNotMatch(withWork.diff, /running = true/);
+	assert.equal(withWork.dirty, true);
+	assert.deepEqual(await changedFiles(scratch, ""), ["greet.ts"]);
+
+	fs.rmSync(scratch, { recursive: true, force: true });
+});

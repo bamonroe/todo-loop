@@ -71,31 +71,48 @@ export async function commitAll(cwd: string, message: string): Promise<boolean> 
 	return true;
 }
 
+/**
+ * Paths kept out of the evidence by default. The queue and its config change on
+ * every task; showing the verifier that churn is pure noise, and worse, it makes
+ * a task that touched nothing else look like it did something.
+ */
+export const DEFAULT_EXCLUDES = ["todo.toml", "todoloop.toml"];
+
+function excludeSpecs(exclude: string[]): string[] {
+	return exclude.length ? ["--", ...exclude.map((path) => `:(exclude)${path}`)] : [];
+}
+
 /** Everything that changed since the task started: committed, staged, unstaged and untracked. */
-export async function collectDiff(cwd: string, baseCommit: string, maxBytes: number): Promise<{ diff: string; files: string[]; dirty: boolean }> {
+export async function collectDiff(
+	cwd: string,
+	baseCommit: string,
+	maxBytes: number,
+	exclude: string[] = DEFAULT_EXCLUDES,
+): Promise<{ diff: string; files: string[]; dirty: boolean }> {
 	if (!(await isGitRepo(cwd))) {
 		return { diff: "(not a git repository — no diff available)", files: [], dirty: false };
 	}
 
 	const range = baseCommit ? [`${baseCommit}..HEAD`] : [];
+	const specs = excludeSpecs(exclude);
 	const parts: string[] = [];
 	const files = new Set<string>();
 
 	if (baseCommit) {
-		const committed = await git(cwd, ["diff", ...range]);
+		const committed = await git(cwd, ["diff", ...range, ...specs]);
 		if (committed.trim()) parts.push(`# committed since task start\n${committed}`);
-		for (const file of (await git(cwd, ["diff", "--name-only", ...range])).split("\n")) {
+		for (const file of (await git(cwd, ["diff", "--name-only", ...range, ...specs])).split("\n")) {
 			if (file.trim()) files.add(file.trim());
 		}
 	}
 
-	const working = await git(cwd, ["diff", "HEAD"]);
+	const working = await git(cwd, ["diff", "HEAD", ...specs]);
 	if (working.trim()) parts.push(`# uncommitted working tree\n${working}`);
-	for (const file of (await git(cwd, ["diff", "--name-only", "HEAD"])).split("\n")) {
+	for (const file of (await git(cwd, ["diff", "--name-only", "HEAD", ...specs])).split("\n")) {
 		if (file.trim()) files.add(file.trim());
 	}
 
-	const untracked = (await git(cwd, ["ls-files", "--others", "--exclude-standard"]))
+	const untracked = (await git(cwd, ["ls-files", "--others", "--exclude-standard", ...specs]))
 		.split("\n")
 		.map((line) => line.trim())
 		.filter(Boolean);
@@ -109,19 +126,25 @@ export async function collectDiff(cwd: string, baseCommit: string, maxBytes: num
 		parts.push(`# new untracked files\n${shown.join("\n")}`);
 	}
 
-	const dirty = !(await isTreeClean(cwd));
+	// Dirtiness is about the task's own work, so it ignores the excluded paths too.
+	const dirty = files.size > 0;
 	const diff = parts.join("\n\n").trim() || "(no changes)";
 	return { diff: truncateHead(diff, maxBytes), files: [...files], dirty };
 }
 
 /** Just the names — for compaction summaries, where the diff itself is too big. */
-export async function changedFiles(cwd: string, baseCommit: string): Promise<string[]> {
+export async function changedFiles(
+	cwd: string,
+	baseCommit: string,
+	exclude: string[] = DEFAULT_EXCLUDES,
+): Promise<string[]> {
 	if (!(await isGitRepo(cwd))) return [];
 	const names = new Set<string>();
+	const specs = excludeSpecs(exclude);
 	const sources = [
-		baseCommit ? ["diff", "--name-only", `${baseCommit}..HEAD`] : undefined,
-		["diff", "--name-only", "HEAD"],
-		["ls-files", "--others", "--exclude-standard"],
+		baseCommit ? ["diff", "--name-only", `${baseCommit}..HEAD`, ...specs] : undefined,
+		["diff", "--name-only", "HEAD", ...specs],
+		["ls-files", "--others", "--exclude-standard", ...specs],
 	];
 	for (const args of sources) {
 		if (!args) continue;
@@ -161,6 +184,8 @@ export interface EvidenceOptions {
 	requireTestsPass: boolean;
 	timeoutMs: number;
 	maxBytes: number;
+	/** Paths kept out of the diff; defaults to the queue and its config. */
+	exclude?: string[];
 }
 
 /**
@@ -169,7 +194,12 @@ export interface EvidenceOptions {
  */
 export async function gatherEvidence(options: EvidenceOptions): Promise<Evidence> {
 	const perPart = Math.max(1000, Math.floor(options.maxBytes / 3));
-	const { diff, files, dirty } = await collectDiff(options.cwd, options.baseCommit, perPart);
+	const { diff, files, dirty } = await collectDiff(
+		options.cwd,
+		options.baseCommit,
+		perPart,
+		options.exclude ?? DEFAULT_EXCLUDES,
+	);
 
 	const commands: CommandRun[] = [];
 	for (const command of [options.buildCommand, options.testCommand]) {

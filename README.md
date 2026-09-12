@@ -105,7 +105,9 @@ in `.pi/extensions/`.
    from `todoloop.toml` run, and a failure short-circuits before any model call.
    An empty diff is also a hard failure.
 3. The verifier model gets the task text, the changed files, the diff, and the
-   command output. It does **not** get the conversation or the worker's summary.
+   command output. `todo.toml` and `todoloop.toml` are excluded from that diff —
+   the loop's own bookkeeping changes on every task, and showing it to the
+   verifier makes a task that touched nothing else look like it did something. It does **not** get the conversation or the worker's summary.
    It answers one narrow question — does this diff do what the task asked? — as
    `{"pass": bool, "reason": string}`.
 4. On a pass: the task is archived, the work is committed, and `/todo-advance`
@@ -200,7 +202,7 @@ rejected.
 ## Tests
 
 ```bash
-node --test test/      # 55 tests, no model required
+node --test test/      # 75 tests, no model required
 npx tsc                # type-checks src, extension and tests
 ```
 
@@ -208,6 +210,13 @@ The suite covers the TOML round-trip, leaf selection and roll-up, prompt
 rendering, git evidence collection against a real temporary repository, the
 verdict parser against the shapes local models actually emit, queue-shape
 auditing, and the CLI end to end in `--dry-run`.
+
+The extension is driven against a fake pi API, so the wiring that only exists at
+runtime is covered too: which hook fires when, that a rejection resumes the
+worker instead of ending the turn, that three rejections block the task, that a
+run ending without `todo_complete` halts rather than advancing, and that the
+pruning, truncation and compaction hooks stay out of the way when the loop is
+not running.
 
 Separately, the verifier has been exercised against a live local model
 (`qwen3.5:9b` on Ollama). Given a diff that adds the requested `/health` route
