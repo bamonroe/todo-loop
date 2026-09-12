@@ -3,7 +3,15 @@
 	"version": "0.1.0",
 	"private": true,
 	"description": "Autonomous todo loop for the pi coding agent: one task per session, verified before it closes.",
+	"keywords": [
+		"pi-package"
+	],
 	"type": "module",
+	"pi": {
+		"extensions": [
+			"./extension"
+		]
+	},
 	"bin": {
 		"todo": "./bin/todo"
 	},

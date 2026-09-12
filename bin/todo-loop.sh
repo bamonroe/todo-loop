@@ -22,7 +22,8 @@ for ((i = 1; i <= max; i++)); do
 	echo "=== [$i/$max] $id ==="
 	"$todo" start >/dev/null
 
-	pi -p -- "$prompt" || echo "pi exited non-zero; verifying anyway" >&2
+	# stdin from /dev/null: print mode waits for EOF before it runs the prompt.
+	pi -p -- "$prompt" </dev/null || echo "pi exited non-zero; verifying anyway" >&2
 
 	if "$todo" complete "$id"; then
 		continue

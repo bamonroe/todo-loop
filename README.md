@@ -80,6 +80,11 @@ todo run --dry-run       # prints each prompt instead of calling a model
 `bin/todo-loop.sh` is the same loop written as fifteen lines of bash, for when
 you want to see exactly what is happening.
 
+One thing to know if you write your own driver: pi's print mode waits for EOF on
+stdin before it runs the prompt. Launch it with stdin closed (`</dev/null`, or
+`stdio: ["ignore", ...]`) or it will sit there with the model loaded and idle,
+looking exactly like a slow model.
+
 ### In-session extension
 
 Keeps everything inside one pi process, replacing the session between tasks.

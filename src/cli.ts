@@ -335,7 +335,9 @@ function runPi(env: Env, prompt: string, dryRun: boolean): Promise<number> {
 				return ["-p", "--provider", provider, "--model", model, "--", prompt];
 			})();
 	return new Promise((resolve) => {
-		const child = spawn("pi", args, { cwd: env.cwd, stdio: "inherit" });
+		// stdin must be closed: pi's print mode waits for EOF before it runs the
+		// prompt, so an inherited pipe makes it hang with the model loaded and idle.
+		const child = spawn("pi", args, { cwd: env.cwd, stdio: ["ignore", "inherit", "inherit"] });
 		child.on("error", (error) => {
 			console.error(`failed to launch pi: ${error.message}`);
 			resolve(127);
