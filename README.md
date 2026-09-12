@@ -208,7 +208,7 @@ rejected.
 ## Tests
 
 ```bash
-node --test test/      # 75 tests, no model required
+node --test test/      # 79 tests, no model required
 npx tsc                # type-checks src, extension and tests
 ```
 
@@ -216,6 +216,17 @@ The suite covers the TOML round-trip, leaf selection and roll-up, prompt
 rendering, git evidence collection against a real temporary repository, the
 verdict parser against the shapes local models actually emit, queue-shape
 auditing, and the CLI end to end in `--dry-run`.
+
+There is also a live check that needs a running model:
+
+```bash
+node scripts/live-extension-check.ts        # add --keep to inspect the workspace
+```
+
+It drives the extension inside a real pi session over RPC with a two-task queue,
+which exercises the part the fakes cannot: that `newSession` works from a
+command, that the `/todo-advance` a tool queues is actually dispatched, and that
+the tools reach the model at all. It reports any `extension_error` pi emits.
 
 The extension is driven against a fake pi API, so the wiring that only exists at
 runtime is covered too: which hook fires when, that a rejection resumes the

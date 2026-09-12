@@ -42,6 +42,17 @@ detail = """
 Create greet.ts exporting \`greet(name: string): string\` returning "hello, <name>".
 Plain TypeScript, type annotations only, run directly by node. No test file needed.
 """
+
+[[task]]
+id = "shout"
+title = "Add a shout function"
+status = "todo"
+attempts = 0
+detail = """
+Create shout.ts exporting \`shout(text: string): string\` returning the text
+uppercased with an exclamation mark appended.
+Plain TypeScript, type annotations only, run directly by node. No test file needed.
+"""
 `;
 
 const CONFIG = `
@@ -122,18 +133,21 @@ let lastReport = "";
 while (Date.now() < deadline) {
 	await sleep(5000);
 	const store = loadStore(path.join(repo, "todo.toml"));
-	const task = store.tasks[0];
-	const report = `${task.status} attempts=${task.attempts} running=${store.loop.running}`;
+	const report = `${store.tasks.map((task) => `${task.id}=${task.status}/${task.attempts}`).join(" ")} running=${store.loop.running}`;
 	if (report !== lastReport) {
 		console.log(`· ${report}`);
 		lastReport = report;
 	}
-	if (task.status === "done") {
+	if (store.tasks.every((task) => task.status === "done")) {
 		outcome = "done";
 		break;
 	}
-	if (task.status === "blocked" || (!store.loop.running && task.status !== "todo")) {
-		outcome = task.status === "blocked" ? "blocked" : "halted";
+	if (store.tasks.some((task) => task.status === "blocked")) {
+		outcome = "blocked";
+		break;
+	}
+	if (!store.loop.running && store.tasks.some((task) => task.status === "doing")) {
+		outcome = "halted";
 		break;
 	}
 }
@@ -143,20 +157,22 @@ await sleep(1000);
 child.kill();
 
 const store = loadStore(path.join(repo, "todo.toml"));
-const greetExists = fs.existsSync(path.join(repo, "greet.ts"));
+const created = ["greet.ts", "shout.ts"].filter((file) => fs.existsSync(path.join(repo, file)));
+const commits = execFileSync("git", ["log", "--oneline"], { cwd: repo, encoding: "utf8" }).trim().split("\n");
 
 console.log("\n--- result ---");
 console.log(`outcome:          ${outcome}`);
-console.log(`task status:      ${store.tasks[0].status}`);
-console.log(`attempts:         ${store.tasks[0].attempts}`);
-console.log(`greet.ts created: ${greetExists}`);
+for (const task of store.tasks) console.log(`  ${task.id}: ${task.status} (${task.attempts} attempts)`);
+console.log(`files created:    ${created.join(", ") || "(none)"}`);
+console.log(`commits:          ${commits.length}`);
 console.log(`last failure:     ${store.loop.last_failure || "(none)"}`);
 console.log(`extension errors: ${extensionErrors.length}`);
-if (greetExists) console.log(`\n${fs.readFileSync(path.join(repo, "greet.ts"), "utf8")}`);
 
 if (!keep) fs.rmSync(repo, { recursive: true, force: true });
 else console.log(`\nkept ${repo}`);
 
-const passed = outcome === "done" && greetExists && extensionErrors.length === 0;
+// Two tasks means the automatic advance — a tool queueing a command that
+// replaces the session — is exercised for real, not just the first kickoff.
+const passed = outcome === "done" && created.length === 2 && extensionErrors.length === 0;
 console.log(passed ? "\nPASS" : "\nFAIL");
 process.exit(passed ? 0 : 1);
