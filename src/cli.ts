@@ -10,7 +10,8 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { DEFAULT_CONFIG_FILE, loadConfig, splitModelRef, type Config } from "./config.ts";
+import { DEFAULT_CONFIG_FILE, inheritsWorker, loadConfig, splitModelRef, type Config } from "./config.ts";
+import { diagnose, formatChecks } from "./doctor.ts";
 import { commitAll, gatherEvidence, headCommit, isGitRepo, isTreeClean } from "./evidence.ts";
 import { renderTaskPrompt } from "./prompt.ts";
 import {
@@ -113,6 +114,7 @@ async function verifyTask(env: Env, task: Task, signal?: AbortSignal): Promise<V
 const USAGE = `todo — autonomous todo loop for pi
 
   todo init                      Write ${DEFAULT_CONFIG_FILE} and ${DEFAULT_STORE_FILE} starters
+  todo doctor [--probe]          Check models, VRAM, git and queue shape
   todo status                    Show the queue
   todo next [--id]               Print the next task's prompt (exit 3 when empty)
   todo start                     Claim the next task and print its prompt
@@ -143,6 +145,14 @@ function commandInit(env: Env, flags: Flags): number {
 		console.log(`kept existing ${env.storeFile}`);
 	}
 	return EXIT_OK;
+}
+
+async function commandDoctor(env: Env, flags: Flags): Promise<number> {
+	const checks = await diagnose({ cwd: env.cwd, config: env.config, store: env.store, probe: bool(flags, "probe") });
+	console.log(formatChecks(checks));
+	const failures = checks.filter((check) => check.level === "fail").length;
+	if (failures) console.error(`\n${failures} blocking problem${failures === 1 ? "" : "s"}.`);
+	return failures ? EXIT_ERROR : EXIT_OK;
 }
 
 function commandStatus(env: Env): number {
@@ -315,8 +325,15 @@ function runPi(env: Env, prompt: string, dryRun: boolean): Promise<number> {
 		console.log(`--- would run pi with prompt ---\n${prompt}\n--- end prompt ---`);
 		return Promise.resolve(0);
 	}
-	const { provider, model } = splitModelRef(env.config.models.worker);
-	const args = ["-p", "--provider", provider, "--model", model, "--", prompt];
+	// pi reads a trailing `:suffix` on --model as a thinking level, so an ollama
+	// tag like `qwen3.8-27b:52k` cannot round-trip through the flag. Inheriting
+	// pi's own default is both the safe path and usually what you want.
+	const args = inheritsWorker(env.config)
+		? ["-p", "--", prompt]
+		: (() => {
+				const { provider, model } = splitModelRef(env.config.models.worker);
+				return ["-p", "--provider", provider, "--model", model, "--", prompt];
+			})();
 	return new Promise((resolve) => {
 		const child = spawn("pi", args, { cwd: env.cwd, stdio: "inherit" });
 		child.on("error", (error) => {
@@ -418,6 +435,8 @@ export async function main(argv: string[]): Promise<number> {
 			return commandInit(env, flags);
 		case "status":
 			return commandStatus(env);
+		case "doctor":
+			return commandDoctor(env, flags);
 		case "next":
 			return commandNext(env, flags);
 		case "start":

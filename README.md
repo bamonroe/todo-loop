@@ -17,6 +17,7 @@ Nothing to build. Node 22.18+ runs the TypeScript directly.
 git clone <this repo> todo-loop
 cd your-project
 node /path/to/todo-loop/src/cli.ts init      # or: /path/to/todo-loop/bin/todo init
+todo doctor                                  # check models, VRAM, git and queue shape
 ```
 
 `init` writes two files into your project:
@@ -26,6 +27,39 @@ node /path/to/todo-loop/src/cli.ts init      # or: /path/to/todo-loop/bin/todo i
 
 Dev dependencies (`npm install`) are only needed to run `npx tsc` and are not
 required to use the loop.
+
+## Check the setup first
+
+`todo doctor` answers the questions that are cheaper to ask now than to discover
+halfway through an overnight run: is Ollama up, are both models pulled, is this
+a git repository, and does the queue have a runnable leaf. Add `--probe` to
+measure a real verifier round trip.
+
+The check worth reading carefully is VRAM:
+
+```
+! vram: 18.5GB needed but only 17.2GB available — every verification evicts the
+  worker, so expect two model loads per task.
+```
+
+On a single GPU this is the dominant cost. A 27B worker and a 9B verifier do not
+both fit in 16GB, so each verification swaps the worker out and the next task
+swaps it back in. Measured here, a verifier call that generates a hundred tokens
+takes about 150 seconds, nearly all of it model load.
+
+That is a real trade, not a bug. Independent judgement costs two model loads per
+task. Your options, in order of how much they give up:
+
+1. **Accept it.** Verification is per task, not per turn. Two minutes on a task
+   that took twenty is noise, and this is the only option that keeps the
+   verifier genuinely independent.
+2. **Shrink the worker's context.** KV cache is real VRAM. Dropping the worker
+   from a 52k to a 16k context variant can free enough for a small verifier to
+   stay resident — and if tasks are scoped tightly enough, 16k is plenty.
+3. **Use the same model as its own verifier.** Cheapest and weakest. It still
+   catches empty diffs and failing tests, because those are answered by tooling
+   before the model is asked anything, but it will wave through work that is
+   merely adjacent to the task.
 
 ## Two ways to run it
 
@@ -126,9 +160,15 @@ router in server.ts. No new dependencies.
 See `templates/todoloop.toml` for every option with its default. The ones that
 matter most:
 
+- `models.worker` — defaults to `inherit`, meaning the shell driver uses whatever
+  model pi is already configured with. Prefer that: pi's `--model` flag reads a
+  trailing `:suffix` as a thinking level, so an Ollama tag like
+  `qwen3.8-27b:52k` cannot be passed through the flag at all. The in-session
+  extension always uses the active session model and ignores this setting.
 - `models.verifier` — keep it different from the worker. A model judging its own
   output is the weakest version of this check, and the verify call is short
-  enough that a smaller model is fine.
+  enough that a smaller model is fine. Check `todo doctor` for the VRAM trade
+  before choosing.
 - `verify.test_command` / `verify.build_command` — the more tooling answers, the
   less the verifier has to.
 - `verify.max_attempts` — the cap that stops a slightly-too-strict verifier from
@@ -140,6 +180,7 @@ matter most:
 
 ```
 todo init                      Write todoloop.toml and todo.toml starters
+todo doctor [--probe]          Check models, VRAM, git and queue shape
 todo status                    Show the queue
 todo next [--id]               Print the next task's prompt (exit 3 when empty)
 todo start                     Claim the next task and print its prompt
@@ -159,11 +200,18 @@ rejected.
 ## Tests
 
 ```bash
-node --test test/      # 48 tests, no model required
+node --test test/      # 55 tests, no model required
 npx tsc                # type-checks src, extension and tests
 ```
 
 The suite covers the TOML round-trip, leaf selection and roll-up, prompt
 rendering, git evidence collection against a real temporary repository, the
-verdict parser against the shapes local models actually emit, and the CLI end to
-end in `--dry-run`.
+verdict parser against the shapes local models actually emit, queue-shape
+auditing, and the CLI end to end in `--dry-run`.
+
+Separately, the verifier has been exercised against a live local model
+(`qwen3.5:9b` on Ollama). Given a diff that adds the requested `/health` route
+it returns `pass`; given a diff that adds a `/version` route instead — plausible
+work that is not the task — it returns `fail` and names the gap. That is the
+discrimination the whole design rests on, so it is worth re-running on your own
+models before trusting a long queue to it.

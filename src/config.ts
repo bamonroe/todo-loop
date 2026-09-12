@@ -9,7 +9,14 @@ import { parseToml } from "./toml.ts";
 
 export interface Config {
 	models: {
-		/** Worker model, "provider/id". Only used by the shell driver; in-session the loop uses the active model. */
+		/**
+		 * Worker model for the shell driver, or "inherit" to use whatever pi is
+		 * already configured to use. In-session the loop always uses the active model.
+		 *
+		 * Note that pi's `--model` flag reads a trailing `:suffix` as a thinking
+		 * level, so an ollama tag like `qwen3.8-27b:52k` cannot be passed through
+		 * it. "inherit" sidesteps that entirely.
+		 */
 		worker: string;
 		/** Verifier model. Should differ from the worker — a model judging itself is the weakest version. */
 		verifier: string;
@@ -48,7 +55,7 @@ export interface Config {
 
 export const DEFAULT_CONFIG: Config = {
 	models: {
-		worker: "ollama/qwen3.8-27b:52k",
+		worker: "inherit",
 		verifier: "ollama/qwen3.5:9b",
 	},
 	verify: {
@@ -158,6 +165,25 @@ export function loadConfig(cwd: string, file?: string): Config {
 	const resolved = path.isAbsolute(target) ? target : path.join(cwd, target);
 	if (!fs.existsSync(resolved)) return DEFAULT_CONFIG;
 	return parseConfig(fs.readFileSync(resolved, "utf8"));
+}
+
+/** True when the worker model should be left to pi's own configuration. */
+export function inheritsWorker(config: Config): boolean {
+	const worker = config.models.worker.trim();
+	return worker === "" || worker === "inherit";
+}
+
+/** pi's configured default model, used only for diagnostics. */
+export function piDefaultModel(): string | undefined {
+	const home = process.env.HOME;
+	if (!home) return undefined;
+	const file = path.join(process.env.PI_CONFIG_DIR ?? path.join(home, ".pi", "agent"), "settings.json");
+	try {
+		const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { defaultModel?: string };
+		return typeof parsed.defaultModel === "string" ? parsed.defaultModel : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 /** Split "provider/model:variant" into provider and model id. */

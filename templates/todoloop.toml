@@ -4,10 +4,18 @@
 [models]
 # The worker. Only the shell driver reads this — in-session the loop uses
 # whatever model the pi session is already on.
-worker = "ollama/qwen3.8-27b:52k"
+#
+# "inherit" uses pi's own configured default. Prefer it: pi's --model flag reads
+# a trailing ":suffix" as a thinking level, so an ollama tag like
+# "qwen3.8-27b:52k" cannot be passed through the flag at all.
+worker = "inherit"
 # The verifier. Keep it different from the worker: a model judging its own
 # output is the weakest version of this check. The verify call is short, so a
 # smaller model is fine here.
+#
+# On a single GPU, check `todo doctor` first: if the worker and verifier cannot
+# both stay resident, every verification evicts the worker and you pay two model
+# loads per task.
 verifier = "ollama/qwen3.5:9b"
 
 [verify]
