@@ -1,0 +1,187 @@
+---
+name: todo-loop
+description: Set up and run the todo-loop autonomous task queue in a project — write todoloop.toml and todo.toml, choose build and test commands that gate verification, author a queue of tasks, scopes and epics, and drive the loop. Use when asked to set up todo-loop, initialise a todo queue, add tasks or epics to one, choose a build_command for it, or start an autonomous loop with /todo-run or `todo run`.
+compatibility: Needs the todo-loop package installed and the `todo` CLI on PATH. Node 22.18+, a git repository, and a reachable verifier model.
+---
+
+# todo-loop
+
+An autonomous task queue. One task per session. A task closes only when a
+*different* model — shown the diff and the test output, never the worker's own
+account of what it did — agrees the diff does what the task text asked.
+
+The reasoning behind every choice here is in the package's `README.md` and
+`docs/design-notes.md`. Read those before changing the design; this file is the
+operating manual.
+
+## Setting a project up
+
+Run from the project root, which must be a git repository.
+
+```bash
+todo init      # writes todo.toml (the queue) and todoloop.toml (models, thresholds)
+todo doctor    # checks Ollama, the verifier credentials, git, and the queue shape
+```
+
+### Choosing the build and test commands
+
+This is the most important step, and the one most often skipped.
+
+```toml
+[verify]
+build_command = "npx tsc --noEmit"
+test_command  = "node --test test/"
+```
+
+Work them out by reading `package.json`, `Cargo.toml`, `Makefile`, or the CI
+config. Then apply both checks below. `todo doctor` warns when neither is set.
+
+**Why it matters.** These run before the verifier sees anything, and a non-zero
+exit short-circuits the model call entirely. The verifier judges *intent* — it
+is explicitly told not to review code quality — so it will pass code that does
+not run. In a real run with both commands empty, it passed a module that crashed
+on startup: the file imported `"./config"` in a project that imports
+`"./config.ts"` everywhere. One build command turns that into a hard mechanical
+failure. Tooling should answer the mechanical questions; leave the verifier only
+the judgment call.
+
+**Check 1 — the gate must bite.** A command that always exits 0 is worse than
+none, because it looks like coverage. `npm test` with no tests, `tsc` with no
+`tsconfig.json`, a runner whose glob matches nothing — all exit 0. Introduce a
+syntax error in a source file on purpose, confirm the command exits non-zero,
+then undo it. A gate nobody has watched fire is a gate nobody knows works.
+
+**Check 2 — prohibition, not completeness.** `build_command` is **global**: it
+runs after every task. Tasks are **local**: each touches a slice of the work.
+
+- Prohibitions compose. *"It compiles"*, *"tests pass"*, *"nothing is broken"* —
+  any subset of the finished work satisfies them.
+- Completeness checks do not. *"All four files exist"*, *"every endpoint is
+  implemented"* — the first task cannot pass without doing all the others,
+  which blows its scope and defeats the decomposition entirely.
+
+This failure is silent: the queue still runs, each task just quietly grows to
+the size of the whole epic. Phrase every check as *this did not break anything*,
+never *the project is finished*.
+
+## Writing the queue
+
+Order is priority order — the loop always takes the first incomplete leaf.
+Parents are never handed to the model; a parent's work is its children, and it
+rolls up to `done` on its own once every child is done.
+
+```bash
+todo add api.route "Add GET /health returning 200" \
+  --detail "Edit src/router.ts only. JSON body with status and uptime fields."
+
+todo add auth "Rebuild the authentication system" --level epic
+```
+
+Hierarchy comes from `--parent`, or from dotted ids when it is absent
+(`api.route` sits under `api`).
+
+### Levels
+
+- **`task`** (the default) — atomic and implementable as written. The only level
+  that writes code.
+- **`scope`** — not yet implementable. Working it means reading the code to find
+  out what needs to happen, then adding the concrete tasks. Produces queue
+  entries, not code.
+- **`epic`** — a spanning feature. Produces scopes where the shape is unclear and
+  tasks where it is already clear.
+
+An epic spawns scopes, a scope spawns tasks, a task spawns code. Nothing needs
+decomposing up front — drop an epic in and the loop breaks it down as its first
+assignment.
+
+### What makes a leaf atomic
+
+A leaf must be finishable by one worker in one session with no memory of any
+other session. Apply these as tests, not as adjectives:
+
+- It names the files it touches. **If you cannot name them, it is not a task
+  yet — make it a scope.**
+- It stays within `atomic.max_files` (default 5).
+- Its description has no "and" in it.
+- It is verifiable from the diff alone.
+
+`--detail` is the only context that task will ever have. Put everything it needs
+there — the file paths, the exact signature, the names of things that already
+exist. Being specific here is what makes small models work.
+
+## Running it
+
+**In-session**, when already inside pi:
+
+```
+/todo-run        start the loop
+/todo-status     show the queue
+/todo-stop       stop after the current task finishes
+```
+
+`/todo-run` **takes over the session**. Each verified task replaces the
+conversation with a fresh one, because the whole point is that the worker never
+carries stale context between tasks. Never start a loop in a session being used
+for something else.
+
+In-session, the worker is **whatever model the session is on**. `models.worker`
+in `todoloop.toml` is ignored entirely and only the shell driver reads it. Check
+the status bar before starting.
+
+**Shell driver**, one process per task:
+
+```bash
+todo run --dry-run     # prints every prompt, calls no model, writes nothing
+todo run               # the real thing
+todo run --max 3
+```
+
+Start a new queue with `--dry-run`. It walks the queue in memory and will not
+mark tasks done or commit.
+
+Only the extension can detect compaction firing inside a task, which is one of
+the two signals that a task was not atomic. The shell driver has no such signal.
+
+## How a task closes
+
+1. The worker calls `todo_complete`.
+2. The build and test commands run. Failure, or an empty diff, is a hard failure
+   before any model is called.
+3. The verifier sees the task text, the changed files, and the diff — not the
+   conversation, and not the worker's summary. It answers pass or fail.
+4. Pass: archived, committed, fresh session for the next task.
+5. Fail: the rejection lands in the worker's context without ending the turn, so
+   it continues rather than starting cold. Three strikes blocks the task and
+   halts the loop.
+
+An unreachable or unparseable verifier fails closed. Silence is never a pass.
+
+A **breakdown** — a scope or epic being split — skips all of that. It runs no
+build and asks no model. It is checked mechanically: children exist, their
+levels are legal, titles stand alone, no cycles, and **the working tree is
+unchanged**. That last one is the empty-diff rule inverted: a scope produces
+todos, not code, and this is enforced rather than requested.
+
+## Diagnosing a stuck queue
+
+- `todo status` — the tree, plus any task flagged as having overrun its budget.
+- `todo doctor` — the same warnings plus the environment.
+- `todo reset <id>` — returns a blocked task to `todo` and clears its attempts.
+
+A task blocked after three rejections usually means the task text was ambiguous,
+not that the model is incapable. Read the recorded failure, rewrite the
+`--detail` to be specific, then reset it.
+
+A task flagged as over budget was not atomic. Split it, or set
+`atomic.on_overflow = "promote"` to have the loop turn a failed oversized task
+into a scope and break it down itself.
+
+## Things worth knowing
+
+- Keep the verifier a *different* model from the worker. A model judging its own
+  output is the weakest form of this check.
+- `todo.toml` and `todoloop.toml` are excluded from the diff the verifier sees,
+  so the loop's own bookkeeping cannot make an empty task look productive.
+- A well-formed but useless breakdown passes the mechanical gate. Whether a
+  small model decomposes *well* is not something tooling can answer — read the
+  children it invents before trusting a long queue of epics to it.
