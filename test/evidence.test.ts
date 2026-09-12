@@ -141,3 +141,20 @@ test("a binary new file is named rather than dumped", async () => {
 	assert.match(diff, /new file blob\.bin \(binary, 4 bytes\)/);
 	fs.rmSync(scratch, { recursive: true, force: true });
 });
+
+test("a commit keeps its subject on one line", async () => {
+	const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "todo-loop-commit-"));
+	execFileSync("git", ["init", "-q"], { cwd: scratch });
+	execFileSync("git", ["config", "user.email", "t@e.com"], { cwd: scratch });
+	execFileSync("git", ["config", "user.name", "T"], { cwd: scratch });
+	fs.writeFileSync(path.join(scratch, "greet.ts"), "export const greet = () => 'hi';\n");
+
+	const body = "The diff creates greet.ts with the correct signature.\nIt also adds a test.";
+	assert.equal(await commitAll(scratch, `todo(greet): Add a greet function\n\n${body}`), true);
+
+	const subject = execFileSync("git", ["log", "-1", "--format=%s"], { cwd: scratch, encoding: "utf8" }).trim();
+	assert.equal(subject, "todo(greet): Add a greet function");
+	assert.match(execFileSync("git", ["log", "-1", "--format=%b"], { cwd: scratch, encoding: "utf8" }), /also adds a test/);
+
+	fs.rmSync(scratch, { recursive: true, force: true });
+});

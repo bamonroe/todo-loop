@@ -137,10 +137,12 @@ export default function (pi: ExtensionAPI) {
 		return verify(task, evidence, verifierFor(ctx, ctx.signal));
 	};
 
-	const checkpoint = async (task: Task, summary: string): Promise<void> => {
+	// Subject stays short and scannable; the worker's summary goes in the body.
+	const checkpoint = async (task: Task, body: string): Promise<void> => {
 		if (config.loop.checkpoint !== "commit") return;
 		if (!(await isGitRepo(cwd))) return;
-		await commitAll(cwd, `${config.loop.commit_prefix}(${task.id}): ${summary || task.title}`);
+		const subject = `${config.loop.commit_prefix}(${task.id}): ${task.title}`;
+		await commitAll(cwd, body.trim() ? `${subject}\n\n${body.trim()}` : subject);
 	};
 
 	/**

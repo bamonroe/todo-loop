@@ -295,7 +295,7 @@ async function commandComplete(env: Env, flags: Flags): Promise<number> {
 	if (verdict.pass) {
 		markDone(env.store, task, summaryParts.join(" ") || "Verified complete.");
 		saveStore(env.storeFile, env.store);
-		await checkpoint(env, task, summaryParts.join(" "));
+		await checkpoint(env, task, summaryParts.join(" ") || verdict.reason);
 		console.log(`${task.id} verified and closed`);
 		return EXIT_OK;
 	}
@@ -312,11 +312,13 @@ async function commandComplete(env: Env, flags: Flags): Promise<number> {
 	return EXIT_REJECTED;
 }
 
-async function checkpoint(env: Env, task: Task, summary: string): Promise<void> {
+/** Subject stays short and scannable; the verdict, which can run to a paragraph, goes in the body. */
+async function checkpoint(env: Env, task: Task, body: string): Promise<void> {
 	if (env.config.loop.checkpoint !== "commit") return;
 	if (!(await isGitRepo(env.cwd))) return;
-	const message = `${env.config.loop.commit_prefix}(${task.id}): ${summary || task.title}`;
-	if (await commitAll(env.cwd, message)) console.log(`committed: ${message}`);
+	const subject = `${env.config.loop.commit_prefix}(${task.id}): ${task.title}`;
+	const message = body.trim() ? `${subject}\n\n${body.trim()}` : subject;
+	if (await commitAll(env.cwd, message)) console.log(`committed: ${subject}`);
 }
 
 async function commandCheckpoint(env: Env, flags: Flags): Promise<number> {
@@ -438,6 +440,7 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 			markDone(env.store, current, verdict.reason);
 			saveStore(env.storeFile, env.store);
 			await checkpoint(env, current, current.summary ?? "");
+
 			console.log(`✓ ${current.id} verified`);
 			continue;
 		}
