@@ -304,7 +304,12 @@ matter most:
   [Where the verifier runs](#where-the-verifier-runs) for the local option and
   what each choice costs.
 - `verify.test_command` / `verify.build_command` — the more tooling answers, the
-  less the verifier has to.
+  less the verifier has to. **Set at least one.** With both empty, a real run
+  here passed code that would not start: the module imported `"./config"` in a
+  project that imports `"./config.ts"` everywhere, and the verifier — which is
+  told to judge intent, not resolve modules — passed it. One `build_command`
+  turns that into a hard failure that short-circuits before the verifier is even
+  called. `todo doctor` warns when neither is set.
 - `verify.max_attempts` — the cap that stops a slightly-too-strict verifier from
   becoming an unbounded token burn.
 - `loop.checkpoint` — `commit` (default), `require-clean`, or `off`.
@@ -378,6 +383,15 @@ worker instead of ending the turn, that three rejections block the task, that a
 run ending without `todo_complete` halts rather than advancing, and that the
 pruning, truncation and compaction hooks stay out of the way when the loop is
 not running.
+
+The level design has been exercised end to end against live models too: a 27B
+(`qwen3.8-27b`, IQ3_XXS) broke a "add rate limiting to the HTTP API" epic into
+two ordered tasks — a limiter module plus config, then the router wiring — both
+naming their files, both inside the file budget, and both verified first time by
+`qwen3.6-plus`. The breakdown quoted a helper that already existed in the file it
+was going to edit, which is only knowable by having read it, so "investigate
+first" does real work. See [docs/design-notes.md](docs/design-notes.md) for the
+full run, including what it revealed about running without a `build_command`.
 
 Separately, the verifier has been exercised against live models — `qwen3.5:9b`
 on Ollama and `qwen3.6-plus` on OpenCode Zen. Given a diff that adds the

@@ -379,24 +379,60 @@ rather than burning two more attempts re-running the same oversized prompt. The
 default is `warn`, which records it and surfaces it in `status` and `doctor`,
 because silently restructuring someone's queue is not a default.
 
-### What is still unproven
+### What the models actually did
 
-The verifier's discrimination was tested against live models: given a diff adding
-`/version` when the task said `/health`, both returned `fail` and named the gap.
-That experiment is what the implementation side rests on.
+Measured on this machine: worker `qwen3.8-27b:default` (IQ3_XXS, 16GB card),
+verifier `qwen3.6-plus` on OpenCode Zen. A four-file no-dependency node HTTP
+service, and one epic: *add rate limiting to the HTTP API — per client IP,
+configurable limit and window, 429 with a JSON body, no new dependencies.*
 
-Levels add a second load-bearing assumption of the same kind — **that a small
-local model, told to break down an epic, produces atomic children rather than
-three restatements of the epic** — and nothing yet validates it. The mechanical
-gate catches empty breakdowns, code in a breakdown, and illegal levels. It cannot
-catch a breakdown that is well-formed and useless, which is precisely the class
-of failure the model verifier exists to catch on the other side.
+The 27B broke it into two ordered tasks, and they are the two a person would
+write:
 
-`scripts/live-extension-check.ts` now drives a scope through a real model and
-prints the children it invents, so the output can be judged by eye. Judging it is
-the next piece of work. If small models decompose badly, the answer is probably a
-model check on breakdowns too — once per scope, not once per task, so the cost
-stays bounded.
+1. `src/ratelimit.ts` plus `src/config.ts` — a fixed-window limiter keyed by IP,
+   exporting `check(ip): { allowed, retryAfter }`, with defaults named. "Do not
+   modify any other files."
+2. `src/router.ts` — read the IP off `req.socket.remoteAddress`, call `check`,
+   return `json(res, 429, …)` before dispatch. "The `json` helper is already
+   defined in `src/router.ts`."
+
+Both name their files, both come in under the file budget, both are
+self-contained, and the order runs the right way. The second one proves the
+"investigate first" instruction did something: it could only know that `json`
+already exists in `router.ts` by having read the file. Neither task needed a
+retry, and the epic rolled up on its own.
+
+So the decomposition assumption holds on a well-specified epic. It remains
+untested on a vague one, which is where a well-formed but useless breakdown would
+show up — and that is the failure the mechanical gate structurally cannot catch.
+
+### What the same run says about the verifier
+
+More interesting, and not what was being tested: **the verifier passed code that
+does not run.** `ratelimit.ts` came back importing `"./config"` where every other
+file in that project imports `"./config.ts"`, so the service dies on startup with
+`ERR_MODULE_NOT_FOUND`. The hosted verifier saw the diff and passed it.
+
+That is not a verifier failure. It is told to judge whether the diff does what the
+task asked — which this diff does — and explicitly told not to review code
+quality. Resolution errors are not a matter of opinion, and asking a language
+model to be a module resolver is the wrong tool.
+
+The run had `test_command` and `build_command` empty. Adding one line:
+
+```toml
+build_command = "node --experimental-strip-types -e \"import('./src/router.ts')\""
+```
+
+turns the same evidence into a hard mechanical failure that short-circuits
+*before the verifier is called at all* — `mechanical: true`, no tokens spent, the
+exact stack trace handed back to the worker as the rejection reason.
+
+`todo doctor` warns when neither command is set, and the warning says exactly
+this: *"the verifier has to judge everything on the diff alone."* That warning was
+present and ignored in the run above. It is worth treating as an error in
+practice. The model verifier is for the question tooling cannot answer; every
+question tooling *can* answer should reach it already settled.
 
 ## 6. Relevant API reference
 
