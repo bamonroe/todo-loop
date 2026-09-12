@@ -294,7 +294,111 @@ the window further. `OLLAMA_KEEP_ALIVE=-1` avoids reload latency between tasks.
 
 ---
 
-## 5. Relevant API reference
+## 5. Levels: who decomposes, and what stops a task being too big
+
+The loop takes the first incomplete **leaf** and never prompts an interior node,
+because a parent's work is its children and handing a model a parent is how a
+bounded task becomes a forty-turn run. That rule consumes a decomposed queue but
+says nothing about where the decomposition comes from. Originally: from you, by
+hand, before the run.
+
+The gap that exposes is not subtle. Before levels, an item with no children was
+structurally indistinguishable from an atomic task, so an epic dropped into the
+queue was selected first and handed to a 27B with "Do exactly this task"
+attached — exactly the failure the leaf rule exists to prevent.
+
+`level` closes it. Three tiers, smallest first:
+
+- **`task`** — atomic, implementable as written. The only level that writes code.
+- **`scope`** — not yet implementable. Working it means reading the code, then
+  adding the tasks it breaks into.
+- **`epic`** — spanning. Working it means adding scopes and tasks.
+
+An epic spawns scopes, a scope spawns tasks, a task spawns code.
+
+### Why a breakdown needs no model
+
+The verifier exists because "does this diff do what the task asked" has no
+mechanical answer. A breakdown is a different question entirely, and all of it is
+answerable from the store and the diff: do children exist, are their levels legal,
+do their titles stand alone, are there cycles, and **did the working tree stay
+clean**.
+
+That last check is the implementation gate inverted. An implementation task with
+an empty diff is a hard failure; a breakdown with a *non-empty* diff is the same
+failure the other way round. "A scope produces todos, not code" is enforced, not
+requested — which matters, because a request is exactly the kind of thing a weak
+model drifts away from over twenty turns.
+
+So a breakdown costs no tokens, no network round trip, and nothing leaves the
+machine. On a single GPU that is not a small detail: the hosted verifier exists
+because a local one evicts the worker on every call, and a breakdown skips the
+question altogether.
+
+### The dead end this design walks into, and the way out
+
+The first cut required at least two children, reasoning that one child is a
+rename rather than a breakdown. That is true of an epic and false of a scope — a
+scope is an open question, and "it turns out to be one task" is a real answer.
+
+With a two-child minimum, a scope that really was one task had no exit. One child
+was rejected by the gate; `todo_block`, which the prompt offered as the
+alternative, sets `loop.running = false` and halts the entire queue, stranding
+every unrelated task behind it. On an overnight run that is the worst available
+outcome, and the design produced it on a perfectly ordinary input.
+
+The minimum now applies to epics only, and a scope may return a single task. The
+thing the minimum was really protecting — termination — was never its job: an
+epic may spawn scopes or tasks and a scope may spawn only tasks, so the deepest
+possible chain is epic → scope → task. Nothing can recurse. Blocking is back to
+meaning what it says: genuinely impossible, stop and fetch a human.
+
+### Keeping the bottom level atomic
+
+Everything above only pays off if leaf tasks are small enough to fit one session
+of a model with no memory of any other. Three layers, because prompting alone
+will not hold the line:
+
+**Stated as tests, not adjectives.** "Keep it small" is unfalsifiable. The
+breakdown prompt instead asks for things that either succeed or fail: name the
+files it touches; count them against `atomic.max_files`; if describing the change
+needs "and", it is two tasks; put everything the worker needs in the detail,
+because that is the only context it will ever have. *If you cannot name the
+files, it is still a scope* does more work than any amount of emphasis.
+
+**Measured.** Two signals say a task overran its budget: compaction firing inside
+a single task — the worker ran out of room in work that was supposed to fit — and
+a diff touching more files than the budget allows. Both are free; the loop was
+already collecting them.
+
+**Acted on.** Overflow is never a failure by itself. The work may be entirely
+correct and only the size is in question, and rejecting good work for being broad
+would be its own bug. Under `on_overflow = "promote"`, a task that overran *and*
+failed verification becomes a scope and gets broken down on the next pass —
+rather than burning two more attempts re-running the same oversized prompt. The
+default is `warn`, which records it and surfaces it in `status` and `doctor`,
+because silently restructuring someone's queue is not a default.
+
+### What is still unproven
+
+The verifier's discrimination was tested against live models: given a diff adding
+`/version` when the task said `/health`, both returned `fail` and named the gap.
+That experiment is what the implementation side rests on.
+
+Levels add a second load-bearing assumption of the same kind — **that a small
+local model, told to break down an epic, produces atomic children rather than
+three restatements of the epic** — and nothing yet validates it. The mechanical
+gate catches empty breakdowns, code in a breakdown, and illegal levels. It cannot
+catch a breakdown that is well-formed and useless, which is precisely the class
+of failure the model verifier exists to catch on the other side.
+
+`scripts/live-extension-check.ts` now drives a scope through a real model and
+prints the children it invents, so the output can be judged by eye. Judging it is
+the next piece of work. If small models decompose badly, the answer is probably a
+model check on breakdowns too — once per scope, not once per task, so the cost
+stays bounded.
+
+## 6. Relevant API reference
 
 Gathered from `pi.dev/docs/latest/extensions`.
 

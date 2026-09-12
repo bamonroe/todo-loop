@@ -44,6 +44,30 @@ export interface Config {
 		/** What to do when a run ends without the worker calling todo_complete. */
 		on_silent_stop: "halt" | "retry";
 	};
+	decompose: {
+		/**
+		 * Smallest breakdown accepted. One child is a rename, not a breakdown; a
+		 * scope that really is a single atomic task should be blocked instead, and
+		 * the prompt says so.
+		 */
+		min_children: number;
+	};
+	atomic: {
+		/**
+		 * A leaf task whose diff touches more files than this was almost certainly
+		 * not atomic. Recorded as an overflow, not failed — the work may well be
+		 * correct, and the diff is still judged on its merits.
+		 */
+		max_files: number;
+		/**
+		 * What to do when a leaf task overruns its context budget.
+		 *
+		 * warn: record it on the task and surface it in status and doctor.
+		 * promote: turn it into a scope so the next pass breaks it down.
+		 * off: ignore.
+		 */
+		on_overflow: "warn" | "promote" | "off";
+	};
 	context: {
 		/** Start eliding old tool results once context passes this fraction of the window. */
 		prune_at_fraction: number;
@@ -78,6 +102,13 @@ export const DEFAULT_CONFIG: Config = {
 		checkpoint: "commit",
 		commit_prefix: "todo",
 		on_silent_stop: "halt",
+	},
+	decompose: {
+		min_children: 2,
+	},
+	atomic: {
+		max_files: 5,
+		on_overflow: "warn",
 	},
 	context: {
 		prune_at_fraction: 0.6,
@@ -119,6 +150,8 @@ export function parseConfig(text: string): Config {
 	const models = section(doc, "models");
 	const verify = section(doc, "verify");
 	const loop = section(doc, "loop");
+	const decompose = section(doc, "decompose");
+	const atomic = section(doc, "atomic");
 	const context = section(doc, "context");
 	const ollama = section(doc, "ollama");
 
@@ -129,6 +162,11 @@ export function parseConfig(text: string): Config {
 			: DEFAULT_CONFIG.loop.checkpoint;
 	const silentRaw = pickString(loop, "on_silent_stop", DEFAULT_CONFIG.loop.on_silent_stop);
 	const on_silent_stop = silentRaw === "retry" ? "retry" : "halt";
+	const overflowRaw = pickString(atomic, "on_overflow", DEFAULT_CONFIG.atomic.on_overflow);
+	const on_overflow =
+		overflowRaw === "promote" || overflowRaw === "off" || overflowRaw === "warn"
+			? overflowRaw
+			: DEFAULT_CONFIG.atomic.on_overflow;
 
 	return {
 		models: {
@@ -149,6 +187,13 @@ export function parseConfig(text: string): Config {
 			checkpoint,
 			commit_prefix: pickString(loop, "commit_prefix", DEFAULT_CONFIG.loop.commit_prefix),
 			on_silent_stop,
+		},
+		decompose: {
+			min_children: Math.max(1, pickNumber(decompose, "min_children", DEFAULT_CONFIG.decompose.min_children)),
+		},
+		atomic: {
+			max_files: Math.max(1, pickNumber(atomic, "max_files", DEFAULT_CONFIG.atomic.max_files)),
+			on_overflow,
 		},
 		context: {
 			prune_at_fraction: pickNumber(context, "prune_at_fraction", DEFAULT_CONFIG.context.prune_at_fraction),

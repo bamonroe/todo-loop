@@ -30,22 +30,31 @@ import {
 	isTreeClean,
 	truncateTail,
 } from "../src/evidence.ts";
-import { renderPinnedTask, renderTaskPrompt } from "../src/prompt.ts";
+import { renderAssignmentPrompt, renderPinnedTask } from "../src/prompt.ts";
 import {
+	allowedChildLevels,
+	assignmentFor,
+	childrenOf,
 	counts,
 	findTask,
+	insertChildren,
+	levelOf,
 	loadStore,
 	markBlocked,
 	markDoing,
 	markDone,
+	markOverflow,
 	nextLeaf,
+	promoteToScope,
 	recordFailure,
 	renderTree,
 	resolveStorePath,
 	saveStore,
 	type Store,
 	type Task,
+	type TaskLevel,
 } from "../src/store.ts";
+import { checkDecomposition } from "../src/decompose.ts";
 import { completerFor } from "../src/providers.ts";
 import { verify, type Completer, type Verdict } from "../src/verify.ts";
 
@@ -55,6 +64,33 @@ const BULKY_TOOLS = new Set(["bash", "grep", "rg", "glob", "list", "read", "web_
 interface TextBlock {
 	type: string;
 	text?: string;
+}
+
+/** Ids come from titles so a weak model never has to invent one. */
+function slugify(title: string): string {
+	const slug = title
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-+|-+$/g, "")
+		.split("-")
+		.slice(0, 6)
+		.join("-");
+	return slug || "task";
+}
+
+/**
+ * Namespace a child under its parent and make it unique.
+ *
+ * Duplicate ids make leaf selection ambiguous — doctor calls that a hard failure
+ * — so a collision is resolved here rather than written into the queue.
+ */
+function uniqueId(store: Store, base: string, parentId: string): string {
+	const prefixed = base.startsWith(`${parentId}.`) ? base : `${parentId}.${base}`;
+	if (!store.tasks.some((task) => task.id === prefixed)) return prefixed;
+	for (let n = 2; ; n++) {
+		const candidate = `${prefixed}-${n}`;
+		if (!store.tasks.some((task) => task.id === candidate)) return candidate;
+	}
 }
 
 function textOf(content: unknown): string {
@@ -73,6 +109,12 @@ export default function (pi: ExtensionAPI) {
 
 	/** Did an agent run actually happen in this session? Guards the silent-stop check. */
 	let sawAgentStart = false;
+	/**
+	 * Did compaction fire while working the current task? The strongest available
+	 * signal that a task was not atomic — the worker ran out of room inside work
+	 * that was supposed to fit in one session. Reset on every advance.
+	 */
+	let compactedThisTask = false;
 	/** Usage from the most recent nested verifier call, reported back on the tool result. */
 	let lastVerifierUsage: Usage | undefined;
 	let spillDir: string | undefined;
@@ -127,17 +169,44 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	const runVerification = async (ctx: ExtensionContext, task: Task, baseCommit: string): Promise<Verdict> => {
-		if (!config.verify.enabled) return { pass: true, reason: "Verification disabled.", mechanical: true };
+		const store = read();
+		const decomposing = assignmentFor(task) === "decompose";
+
 		const evidence = await gatherEvidence({
 			cwd,
 			baseCommit,
-			testCommand: config.verify.test_command,
-			buildCommand: config.verify.build_command,
-			requireTestsPass: config.verify.require_tests_pass,
+			// A breakdown runs no build and no tests: it changed no code, so there is
+			// nothing to build, and paying for a full test run to confirm that would
+			// be the most expensive way to learn nothing.
+			testCommand: decomposing ? "" : config.verify.test_command,
+			buildCommand: decomposing ? "" : config.verify.build_command,
+			requireTestsPass: decomposing ? false : config.verify.require_tests_pass,
 			timeoutMs: config.verify.timeout_ms,
 			maxBytes: config.verify.max_evidence_bytes,
 		});
+
+		// A breakdown is judged entirely by tooling — no model, no network, no cost.
+		if (decomposing) return checkDecomposition(store, task, evidence.files, config);
+
+		if (!config.verify.enabled) return { pass: true, reason: "Verification disabled.", mechanical: true };
+		noteOverflow(task, evidence.files);
 		return verify(task, evidence, verifierFor(ctx, ctx.signal));
+	};
+
+	/**
+	 * Flag a leaf that overran its context budget — too many files, or compaction
+	 * firing inside a single task. Never a failure on its own: the work may be
+	 * right, and only the size is in question.
+	 */
+	const noteOverflow = (task: Task, files: string[]): void => {
+		if (config.atomic.on_overflow === "off") return;
+		if (compactedThisTask && !task.overflowed) {
+			markOverflow(task, "context compaction fired inside a single task");
+			return;
+		}
+		if (files.length > config.atomic.max_files) {
+			markOverflow(task, `touched ${files.length} files (budget ${config.atomic.max_files})`);
+		}
 	};
 
 	// Subject stays short and scannable; the worker's summary goes in the body.
@@ -188,12 +257,18 @@ export default function (pi: ExtensionAPI) {
 
 		// Everything the replacement session needs must be plain data captured
 		// before the switch — the old pi and ctx throw once the session is gone.
-		const kickoff = renderTaskPrompt(store, task, {
+		const kickoff = renderAssignmentPrompt(store, task, {
 			mode: "tool",
 			lastFailure: store.loop.last_failure,
 			attempts: task.attempts,
 			maxAttempts: config.verify.max_attempts,
+			maxFiles: config.atomic.max_files,
+			minChildren: config.decompose.min_children,
 		});
+
+		// A fresh session is a fresh budget; the previous task's overflow must not
+		// follow this one.
+		compactedThisTask = false;
 
 		await ctx.newSession({
 			withSession: async (fresh) => {
@@ -251,7 +326,8 @@ export default function (pi: ExtensionAPI) {
 			const lines = [
 				renderTree(store) || "(no tasks)",
 				"",
-				`${stats.done} done · ${stats.todo} todo · ${stats.doing} in progress · ${stats.blocked} blocked`,
+				`${stats.done} done · ${stats.todo} todo · ${stats.doing} in progress · ${stats.blocked} blocked` +
+					(stats.pending_breakdowns ? ` · ${stats.pending_breakdowns} awaiting breakdown` : ""),
 				`loop ${store.loop.running ? "running" : "stopped"} · iteration ${store.loop.iterations}` +
 					(store.loop.current ? ` · current ${store.loop.current}` : ""),
 			];
@@ -289,13 +365,14 @@ export default function (pi: ExtensionAPI) {
 			const usage = lastVerifierUsage;
 
 			if (verdict.pass) {
+				const overflowNote = task.overflowed ? ` (note: ${task.overflow_reason} — this task was larger than one task should be)` : "";
 				markDone(store, task, params.summary || verdict.reason);
 				write(store);
 				await checkpoint(task, params.summary);
 				// A tool cannot replace the session itself, so queue the command that can.
 				pi.sendUserMessage("/todo-advance", { deliverAs: "followUp", expandPromptTemplates: true });
 				return {
-					content: [{ type: "text", text: `Verified and closed ${task.id}. Moving to the next task.` }],
+					content: [{ type: "text", text: `Verified and closed ${task.id}.${overflowNote} Moving to the next task.` }],
 					details: { taskId: task.id, verdict },
 					usage,
 					terminate: true,
@@ -303,6 +380,33 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const attempts = recordFailure(store, task, verdict.reason);
+
+			// Failed *and* over budget is much more likely to be a task that was
+			// never atomic than a worker that nearly got there. Break it down
+			// instead of spending two more attempts proving the same point.
+			if (
+				config.atomic.on_overflow === "promote" &&
+				task.overflowed &&
+				levelOf(task) === "task" &&
+				assignmentFor(task) === "implement"
+			) {
+				promoteToScope(store, task, `Promoted to scope: ${task.overflow_reason ?? "over budget"}`);
+				write(store);
+				say(ctx, `${task.id} was too coarse (${task.overflow_reason}); it will be broken down instead.`, "warning");
+				pi.sendUserMessage("/todo-advance", { deliverAs: "followUp", expandPromptTemplates: true });
+				return {
+					content: [
+						{
+							type: "text",
+							text: `${task.id} is too large to be one task (${task.overflow_reason}). It has been turned into a scope and will be broken down next.`,
+						},
+					],
+					details: { taskId: task.id, verdict, promoted: true },
+					usage,
+					terminate: true,
+				};
+			}
+
 			if (attempts >= config.verify.max_attempts) {
 				markBlocked(store, task, `Blocked after ${attempts} attempts: ${verdict.reason}`);
 				write(store);
@@ -329,6 +433,88 @@ export default function (pi: ExtensionAPI) {
 				details: { taskId: task.id, verdict, attempts },
 				usage,
 				isError: true,
+			};
+		},
+	});
+
+	/**
+	 * The only way a scope or an epic produces anything. Children are inserted
+	 * beside their parent rather than appended, so the loop stays depth-first.
+	 */
+	pi.registerTool({
+		name: "todo_add",
+		label: "Add Todo",
+		description:
+			"Add a child item under the scope or epic currently being broken down. Call once per child. Only use this while working a breakdown.",
+		promptSnippet: "While breaking down a scope or epic, add each child with todo_add.",
+		parameters: Type.Object({
+			title: Type.String({ description: "One line naming the work. Must stand on its own." }),
+			detail: Type.String({
+				description:
+					"Everything the worker will need: files, function names, formats, constraints. This is the only context that task will ever have.",
+			}),
+			level: Type.Optional(
+				Type.Union([Type.Literal("task"), Type.Literal("scope")], {
+					description: "task = atomic and implementable now. scope = still needs investigation before it can be split.",
+				}),
+			),
+			id: Type.Optional(Type.String({ description: "Explicit id. Defaults to a slug of the title." })),
+		}),
+
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			init(ctx);
+			const store = read();
+			const parent = activeTask(store);
+			if (!parent) {
+				return {
+					content: [{ type: "text", text: "No task is currently assigned; nothing to add children to." }],
+					details: {},
+					isError: true,
+				};
+			}
+			if (assignmentFor(parent) !== "decompose") {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `${parent.id} is a task, not a breakdown. Implement it rather than splitting it. If it is genuinely too large, call todo_block and say so.`,
+						},
+					],
+					details: {},
+					isError: true,
+				};
+			}
+
+			const level = (params.level ?? "task") as TaskLevel;
+			const allowed = allowedChildLevels(levelOf(parent));
+			if (!allowed.includes(level)) {
+				return {
+					content: [
+						{ type: "text", text: `A ${levelOf(parent)} may only spawn ${allowed.join(" or ")}; got ${level}.` },
+					],
+					details: {},
+					isError: true,
+				};
+			}
+
+			const id = uniqueId(store, params.id?.trim() || slugify(params.title), parent.id);
+			const child: Task = {
+				id,
+				title: params.title.trim(),
+				status: "todo",
+				attempts: 0,
+				parent: parent.id,
+			};
+			if (params.detail.trim()) child.detail = params.detail.trim();
+			if (level !== "task") child.level = level;
+
+			insertChildren(store, parent.id, [child]);
+			write(store);
+
+			const total = childrenOf(parent.id, store.tasks).length;
+			return {
+				content: [{ type: "text", text: `Added ${id} [${level}] under ${parent.id} (${total} so far).` }],
+				details: { taskId: id, parent: parent.id, level },
 			};
 		},
 	});
@@ -482,16 +668,33 @@ export default function (pi: ExtensionAPI) {
 		const task = activeTask(store);
 		if (!task) return;
 
+		// Compaction inside a single task is the loudest evidence available that
+		// the task did not fit. Record it here, where it actually happens, and act
+		// on it at verification time.
+		compactedThisTask = true;
+
 		const files = await changedFiles(cwd, store.loop.base_commit);
+		const decomposing = assignmentFor(task) === "decompose";
 		const summary = [
 			"# Task state carried across compaction",
-			`task:          ${task.id}: ${task.title}`,
+			`task:          ${task.id} [${levelOf(task)}]: ${task.title}`,
+			decomposing
+				? "job:           break this down into child tasks with todo_add. Write no code."
+				: "",
 			task.detail ? `detail:        ${task.detail.trim().replace(/\n/g, "\n               ")}` : "",
 			`attempt:       ${task.attempts + 1} of ${config.verify.max_attempts}`,
-			`files_touched: ${files.length ? files.join(", ") : "(none yet)"}`,
+			decomposing
+				? `children_added: ${
+						childrenOf(task.id, store.tasks)
+							.map((child) => `${child.id} [${levelOf(child)}]`)
+							.join(", ") || "(none yet)"
+					}`
+				: `files_touched: ${files.length ? files.join(", ") : "(none yet)"}`,
 			`last_failure:  ${store.loop.last_failure || "(none)"}`,
 			"",
-			"Finish by calling todo_complete. Re-read any file you need; the exploration that got you here is gone.",
+			decomposing
+				? "Do not re-add children that are already listed above. Finish by calling todo_complete."
+				: "Finish by calling todo_complete. Re-read any file you need; the exploration that got you here is gone.",
 		]
 			.filter(Boolean)
 			.join("\n");

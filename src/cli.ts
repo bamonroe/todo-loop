@@ -13,11 +13,19 @@ import * as path from "node:path";
 import { DEFAULT_CONFIG_FILE, inheritsWorker, loadConfig, splitModelRef, type Config } from "./config.ts";
 import { diagnose, formatChecks } from "./doctor.ts";
 import { commitAll, gatherEvidence, headCommit, isGitRepo, isTreeClean } from "./evidence.ts";
-import { renderTaskPrompt } from "./prompt.ts";
+import { renderAssignmentPrompt } from "./prompt.ts";
+import { checkDecomposition } from "./decompose.ts";
 import {
+	allowedChildLevels,
+	assignmentFor,
 	counts,
 	DEFAULT_STORE_FILE,
+	effectiveLevel,
 	findTask,
+	insertChildren,
+	levelOf,
+	markOverflow,
+	promoteToScope,
 	loadStore,
 	markBlocked,
 	markDoing,
@@ -105,10 +113,41 @@ async function evidenceFor(env: Env) {
 	});
 }
 
+/**
+ * A breakdown is checked against the store and the diff; an implementation is
+ * checked by a model. Both are gated on the same evidence, so this is the only
+ * place that has to know which kind of work just happened.
+ */
 async function verifyTask(env: Env, task: Task, signal?: AbortSignal): Promise<Verdict> {
+	const decomposing = assignmentFor(task) === "decompose";
+
+	if (decomposing) {
+		// Re-read: the worker added children through the CLI, so the in-memory
+		// store is stale by exactly the rows that decide this verdict.
+		env.store = loadStore(env.storeFile);
+		const current = findTask(env.store, task.id) ?? task;
+		const evidence = await evidenceFor(env);
+		return checkDecomposition(env.store, current, evidence.files, env.config);
+	}
+
 	if (!env.config.verify.enabled) return { pass: true, reason: "Verification disabled.", mechanical: true };
 	const evidence = await evidenceFor(env);
+	noteOverflow(env, task, evidence.files);
 	return verify(task, evidence, verifierFor(env, signal));
+}
+
+/**
+ * Flag a leaf that touched more files than its budget.
+ *
+ * Deliberately not a failure. The work may be entirely correct, and rejecting
+ * good work for being broad would be its own bug — but a task that took eight
+ * files was not atomic, and that is worth knowing before the queue fills up
+ * with more like it.
+ */
+function noteOverflow(env: Env, task: Task, files: string[]): void {
+	if (env.config.atomic.on_overflow === "off") return;
+	if (files.length <= env.config.atomic.max_files) return;
+	markOverflow(task, `touched ${files.length} files (budget ${env.config.atomic.max_files})`);
 }
 
 const USAGE = `todo — autonomous todo loop for pi
@@ -119,7 +158,7 @@ const USAGE = `todo — autonomous todo loop for pi
   todo stop                      Stop a running loop after the current task
   todo next [--id]               Print the next task's prompt (exit 3 when empty)
   todo start                     Claim the next task and print its prompt
-  todo add <id> <title...>       Append a task (--detail "...", --parent <id>)
+  todo add <id> <title...>       Append a task (--detail "...", --parent <id>, --level task|scope|epic)
   todo done <id> [summary...]    Mark done without verifying
   todo block <id> <reason...>    Mark blocked
   todo reset <id>                Return a task to todo and clear attempts
@@ -162,6 +201,7 @@ function commandStatus(env: Env): number {
 	console.log(tree || "(no tasks)");
 	console.log(
 		`\n${stats.done} done · ${stats.todo} todo · ${stats.doing} in progress · ${stats.blocked} blocked` +
+			(stats.pending_breakdowns ? ` · ${stats.pending_breakdowns} awaiting breakdown` : "") +
 			`\nloop: ${env.store.loop.running ? "running" : "stopped"}` +
 			(env.store.loop.current ? ` · current ${env.store.loop.current}` : "") +
 			` · iteration ${env.store.loop.iterations}`,
@@ -186,11 +226,13 @@ function commandNext(env: Env, flags: Flags): number {
 		return EXIT_OK;
 	}
 	console.log(
-		renderTaskPrompt(env.store, task, {
+		renderAssignmentPrompt(env.store, task, {
 			mode: "standalone",
 			lastFailure: env.store.loop.last_failure,
 			attempts: task.attempts,
 			maxAttempts: env.config.verify.max_attempts,
+			maxFiles: env.config.atomic.max_files,
+			minChildren: env.config.decompose.min_children,
 		}),
 	);
 	return EXIT_OK;
@@ -214,15 +256,49 @@ function commandAdd(env: Env, flags: Flags): number {
 		console.error(`task ${id} already exists`);
 		return EXIT_ERROR;
 	}
+	const levelRaw = str(flags, "level", "task").trim().toLowerCase();
+	if (levelRaw !== "task" && levelRaw !== "scope" && levelRaw !== "epic") {
+		console.error(`--level must be task, scope or epic (got ${levelRaw})`);
+		return EXIT_ERROR;
+	}
+
 	const task: Task = { id, title: titleParts.join(" "), status: "todo", attempts: 0 };
 	const detail = str(flags, "detail");
 	if (detail) task.detail = detail;
+	if (levelRaw !== "task") task.level = levelRaw;
+
 	const parent = str(flags, "parent");
-	if (parent) task.parent = parent;
-	env.store.tasks.push(task);
+	if (parent) {
+		const owner = findTask(env.store, parent);
+		if (!owner) {
+			console.error(`no such parent: ${parent}`);
+			return EXIT_ERROR;
+		}
+		// An item gaining a child becomes a container, so naming a parent is enough
+		// — no need to declare its level first. Only an explicit `level = "task"`
+		// is refused, because that is a contradiction someone wrote on purpose.
+		const allowed = allowedChildLevels(effectiveLevel(owner, env.store.tasks));
+		if (owner.level === "task") {
+			console.error(`${parent} is declared a task and cannot own children; make it a scope or an epic first`);
+			return EXIT_ERROR;
+		}
+		if (allowed.length && !allowed.includes(levelRaw)) {
+			console.error(
+				`a ${effectiveLevel(owner, env.store.tasks)} may only spawn ${allowed.join(" or ")} (got ${levelRaw})`,
+			);
+			return EXIT_ERROR;
+		}
+		task.parent = parent;
+		// Order is priority order, so children belong beside their parent rather
+		// than behind every unrelated epic already in the queue.
+		insertChildren(env.store, parent, [task]);
+	} else {
+		env.store.tasks.push(task);
+	}
+
 	rollup(env.store);
 	saveStore(env.storeFile, env.store);
-	console.log(`added ${id}`);
+	console.log(`added ${id}${parent ? ` under ${parent}` : ""}${levelRaw !== "task" ? ` [${levelRaw}]` : ""}`);
 	return EXIT_OK;
 }
 
@@ -380,12 +456,22 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 	const dryRun = bool(flags, "dry-run");
 	const maxIterations = Number(str(flags, "max", String(env.config.loop.max_iterations))) || 1;
 
+	// A dry run walks the queue in memory and writes nothing. Marking every task
+	// done — or committing whatever happens to be in the tree — is not what
+	// "print the prompts instead of calling a model" should mean.
+	const persist = (): void => {
+		if (!dryRun) saveStore(env.storeFile, env.store);
+	};
+	const refresh = (): void => {
+		if (!dryRun) env.store = loadStore(env.storeFile);
+	};
+
 	env.store.loop.running = true;
 	env.store.loop.iterations = 0;
-	saveStore(env.storeFile, env.store);
+	persist();
 
 	for (let iteration = 1; iteration <= maxIterations; iteration++) {
-		env.store = loadStore(env.storeFile);
+		refresh();
 		if (!env.store.loop.running) {
 			console.log("loop stopped");
 			return EXIT_OK;
@@ -394,7 +480,7 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 		const task = nextLeaf(env.store);
 		if (!task) {
 			env.store.loop.running = false;
-			saveStore(env.storeFile, env.store);
+			persist();
 			console.log(`queue empty after ${iteration - 1} iterations`);
 			return EXIT_OK;
 		}
@@ -402,26 +488,29 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 		if (env.config.loop.checkpoint === "require-clean" && !(await isTreeClean(env.cwd))) {
 			console.error("working tree is dirty and checkpoint = require-clean; refusing to start a task");
 			env.store.loop.running = false;
-			saveStore(env.storeFile, env.store);
+			persist();
 			return EXIT_ERROR;
 		}
 
 		markDoing(env.store, task, await headCommit(env.cwd));
 		env.store.loop.iterations = iteration;
-		saveStore(env.storeFile, env.store);
+		persist();
 
-		const prompt = renderTaskPrompt(env.store, task, {
+		const prompt = renderAssignmentPrompt(env.store, task, {
 			mode: "standalone",
 			lastFailure: env.store.loop.last_failure,
 			attempts: task.attempts,
 			maxAttempts: env.config.verify.max_attempts,
+			maxFiles: env.config.atomic.max_files,
+			minChildren: env.config.decompose.min_children,
 		});
 
-		console.log(`\n=== [${iteration}/${maxIterations}] ${task.id}: ${task.title} ===`);
+		const kind = assignmentFor(task) === "decompose" ? `break down ${levelOf(task)}` : "implement";
+		console.log(`\n=== [${iteration}/${maxIterations}] ${kind} — ${task.id}: ${task.title} ===`);
 		const result = await runPi(env, prompt, dryRun);
 		if (result.code !== 0) console.error(`pi exited ${result.code}; verifying anyway`);
 
-		env.store = loadStore(env.storeFile);
+		refresh();
 		const current = findTask(env.store, task.id);
 		if (!current) continue;
 
@@ -430,7 +519,7 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 		const blocker = findBlockMarker(result.output);
 		if (blocker) {
 			markBlocked(env.store, current, blocker);
-			saveStore(env.storeFile, env.store);
+			persist();
 			console.error(`⊘ ${current.id} blocked by the worker: ${blocker}`);
 			return EXIT_ERROR;
 		}
@@ -438,8 +527,8 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 		const verdict = dryRun ? { pass: true, reason: "dry run" } : await verifyTask(env, current);
 		if (verdict.pass) {
 			markDone(env.store, current, verdict.reason);
-			saveStore(env.storeFile, env.store);
-			await checkpoint(env, current, current.summary ?? "");
+			persist();
+			if (!dryRun) await checkpoint(env, current, current.summary ?? "");
 
 			console.log(`✓ ${current.id} verified`);
 			continue;
@@ -447,18 +536,34 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 
 		const attempts = recordFailure(env.store, current, verdict.reason);
 		console.error(`✗ ${current.id} rejected (attempt ${attempts}/${env.config.verify.max_attempts}): ${verdict.reason}`);
+
+		// A task that both overran its context budget and failed verification is
+		// far more likely to be too big than to be nearly right. Retrying the same
+		// oversized prompt two more times just spends tokens confirming that.
+		if (
+			env.config.atomic.on_overflow === "promote" &&
+			current.overflowed &&
+			levelOf(current) === "task" &&
+			assignmentFor(current) === "implement"
+		) {
+			promoteToScope(env.store, current, `Promoted to scope: ${current.overflow_reason ?? "over budget"}`);
+			persist();
+			console.error(`↑ ${current.id} promoted to scope — ${current.overflow_reason}; it will be broken down next`);
+			continue;
+		}
+
 		if (attempts >= env.config.verify.max_attempts) {
 			markBlocked(env.store, current, `Blocked after ${attempts} attempts: ${verdict.reason}`);
-			saveStore(env.storeFile, env.store);
+			persist();
 			console.error("halting: a task the worker cannot finish should not become an unbounded token burn");
 			return EXIT_ERROR;
 		}
-		saveStore(env.storeFile, env.store);
+		persist();
 	}
 
-	env.store = loadStore(env.storeFile);
+	refresh();
 	env.store.loop.running = false;
-	saveStore(env.storeFile, env.store);
+	persist();
 	console.error(`stopped after the ${maxIterations}-iteration cap`);
 	return EXIT_ERROR;
 }

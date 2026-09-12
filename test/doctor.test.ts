@@ -102,3 +102,60 @@ test("formatting marks each level", () => {
 	]);
 	assert.equal(text, "✓ a: fine\n! b: hmm\n✗ c: no");
 });
+
+test("an explicit task owning children is a hard failure", () => {
+	const checks = auditQueue(
+		parseStore(`
+[[task]]
+id = "api"
+title = "Build the API"
+level = "task"
+[[task]]
+id = "api.route"
+title = "Add GET /health returning 200"
+`),
+	);
+	assert.equal(levelOf(checks, "tasks with children"), "fail");
+});
+
+test("a scope spawning a scope is a hard failure", () => {
+	const checks = auditQueue(
+		parseStore(`
+[[task]]
+id = "sessions"
+title = "Rework session storage"
+level = "scope"
+[[task]]
+id = "sessions.cookies"
+title = "Investigate the cookie flags"
+level = "scope"
+`),
+	);
+	assert.equal(levelOf(checks, "level violations"), "fail");
+});
+
+test("pending breakdowns are reported, not warned about", () => {
+	const checks = auditQueue(
+		parseStore(`
+[[task]]
+id = "auth"
+title = "Rebuild authentication"
+level = "epic"
+`),
+	);
+	assert.equal(levelOf(checks, "pending breakdowns"), "ok");
+});
+
+test("tasks that ran over budget are surfaced", () => {
+	const checks = auditQueue(
+		parseStore(`
+[[task]]
+id = "big"
+title = "Rewrite the data layer"
+status = "done"
+overflowed = true
+overflow_reason = "touched 14 files (budget 5)"
+`),
+	);
+	assert.equal(levelOf(checks, "tasks that ran over budget"), "warn");
+});

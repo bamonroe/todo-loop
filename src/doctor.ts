@@ -15,7 +15,19 @@ import type { Config } from "./config.ts";
 import { inheritsWorker, piDefaultModel, splitModelRef } from "./config.ts";
 import { isGitRepo, isTreeClean } from "./evidence.ts";
 import { endpointFor, REMOTE_PROVIDERS, type Endpoint } from "./providers.ts";
-import { counts, findTask, isLeaf, nextLeaf, parentOf, type Store } from "./store.ts";
+import {
+	allowedChildLevels,
+	counts,
+	effectiveLevel,
+	findTask,
+	isLeaf,
+	levelOf,
+	needsBreakdown,
+	nextLeaf,
+	parentOf,
+	type Store,
+} from "./store.ts";
+import { MIN_TITLE_LENGTH } from "./decompose.ts";
 
 const run = promisify(execFile);
 
@@ -137,6 +149,53 @@ export function auditQueue(store: Store): Check[] {
 		checks.push({ level: "fail", label: "cyclic parents", detail: cyclic.map((task) => task.id).join(", ") });
 	}
 
+	// "A task spawns code" — a task owning children is a contradiction. The CLI
+	// refuses to create one, so this catches hand-edited queues.
+	const codeParents = store.tasks.filter((task) => task.level === "task" && !isLeaf(task, store.tasks));
+	if (codeParents.length) {
+		checks.push({
+			level: "fail",
+			label: "tasks with children",
+			detail: `${codeParents.map((task) => task.id).join(", ")} — only a scope or an epic may own children; raise their level`,
+		});
+	}
+
+	const badLevels = store.tasks.filter((task) => {
+		const parentId = parentOf(task, store.tasks);
+		const parent = parentId ? findTask(store, parentId) : undefined;
+		return parent ? !allowedChildLevels(effectiveLevel(parent, store.tasks)).includes(levelOf(task)) : false;
+	});
+	if (badLevels.length) {
+		checks.push({
+			level: "fail",
+			label: "level violations",
+			detail: `${badLevels.map((task) => `${task.id} [${levelOf(task)}]`).join(", ")} — an epic spawns scopes or tasks, a scope spawns tasks`,
+		});
+	}
+
+	const pending = store.tasks.filter((task) => task.status !== "done" && needsBreakdown(task, store.tasks));
+	if (pending.length) {
+		checks.push({
+			level: "ok",
+			label: "pending breakdowns",
+			detail: `${pending.map((task) => `${task.id} [${levelOf(task)}]`).join(", ")} — the loop will break these down before implementing anything under them`,
+		});
+	}
+
+	const coarse = store.tasks.filter((task) => task.overflowed);
+	if (coarse.length) {
+		checks.push({
+			level: "warn",
+			label: "tasks that ran over budget",
+			detail:
+				`${coarse.map((task) => `${task.id} (${task.overflow_reason})`).join(", ")} — these were not atomic. ` +
+				"Split them, or set atomic.on_overflow = \"promote\" to have the loop break them down itself.",
+		});
+	}
+
+	// Still every non-leaf, level or not: a scope's detail *is* shown by the
+	// breakdown prompt, but only while it is childless — and then it is a leaf.
+	// Once it has children nothing prompts it again, so the text is dead.
 	const detailedParents = store.tasks.filter((task) => !isLeaf(task, store.tasks) && task.detail);
 	if (detailedParents.length) {
 		checks.push({
@@ -146,7 +205,9 @@ export function auditQueue(store: Store): Check[] {
 		});
 	}
 
-	const thin = store.tasks.filter((task) => isLeaf(task, store.tasks) && task.status === "todo" && task.title.length < 12);
+	const thin = store.tasks.filter(
+		(task) => isLeaf(task, store.tasks) && task.status === "todo" && task.title.length < MIN_TITLE_LENGTH,
+	);
 	if (thin.length) {
 		checks.push({
 			level: "warn",
@@ -159,7 +220,9 @@ export function auditQueue(store: Store): Check[] {
 	checks.push({
 		level: nextLeaf(store) ? "ok" : "warn",
 		label: "queue",
-		detail: `${store.tasks.length} task${store.tasks.length === 1 ? "" : "s"}, ${stats.leaves} leaves, ${stats.todo} todo, ${stats.blocked} blocked` +
+		detail:
+			`${store.tasks.length} task${store.tasks.length === 1 ? "" : "s"}, ${stats.leaves} leaves, ${stats.todo} todo, ${stats.blocked} blocked` +
+			(stats.pending_breakdowns ? `, ${stats.pending_breakdowns} awaiting breakdown` : "") +
 			(nextLeaf(store) ? `, next is ${nextLeaf(store)?.id}` : ", nothing runnable"),
 	});
 

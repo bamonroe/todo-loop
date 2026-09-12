@@ -1,5 +1,12 @@
 # Managed by todo-loop. Order is priority order; the loop always takes
-# the first incomplete leaf. Dotted ids imply hierarchy (a.b is under a).
+# the first incomplete leaf. Hierarchy comes from an explicit `parent = "id"`,
+# or from dotted ids (a.b is under a) when parent is absent.
+#
+# `level` says what working an item means:
+#   task   (default) implement it — this is the only level that writes code
+#   scope  investigate, then add the atomic tasks it breaks into
+#   epic   a spanning feature; break it into scopes and tasks
+# An epic spawns scopes, a scope spawns tasks, a task spawns code.
 
 [loop]
 running = false
@@ -14,7 +21,18 @@ title = "Replace this with real work"
 status = "todo"
 attempts = 0
 detail = """
-Only leaves are ever handed to the model. Give each leaf a scope one focused
-session can finish — if compaction fires routinely inside a single task, the
-task is too coarse. Split it before reaching for compression.
+Only leaves are ever handed to the model. A leaf task must be finishable by one
+worker in one session with no memory of any other: name the files it touches,
+keep it under atomic.max_files, and put everything it needs in this detail —
+it is the only context that task will ever have.
+
+If you cannot name the files, it is not a task yet. Make it a scope and let the
+loop break it down:
+
+  [[task]]
+  id = "auth"
+  title = "Rebuild authentication"
+  level = "epic"
+  status = "todo"
+  attempts = 0
 """

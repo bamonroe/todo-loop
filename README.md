@@ -100,9 +100,15 @@ todo add api        "Build the health API"
 todo add api.route  "Add GET /health returning 200" --detail "JSON body with status and uptime."
 todo add api.test   "Cover /health with a test"
 
+# or let the loop do the breaking down:
+todo add auth "Rebuild the authentication system" --level epic
+
 todo run                 # drives the whole queue
 todo run --dry-run       # prints each prompt instead of calling a model
 ```
+
+`--dry-run` walks the queue in memory and writes nothing — it will not mark
+tasks done, and it will not commit.
 
 `bin/todo-loop.sh` is the same loop written as fifteen lines of bash, for when
 you want to see exactly what is happening.
@@ -126,6 +132,9 @@ pi -e /path/to/todo-loop/extension/index.ts
 /todo-stop      stop after the current task
 /todo-status    show the queue
 ```
+
+Three tools reach the model: `todo_complete`, `todo_block`, and `todo_add` —
+the last only while a scope or an epic is being broken down.
 
 To load it permanently, add it to `~/.pi/agent/settings.json` or drop a symlink
 in `.pi/extensions/`.
@@ -151,6 +160,11 @@ in `.pi/extensions/`.
 A verifier that is unreachable, or that returns something unparseable, fails
 closed. Silence is never a pass.
 
+A **breakdown** — a scope or an epic being split up — skips steps 2 and 3
+entirely. It runs no build and no tests (it changed no code, so there is nothing
+to build), and asks no model. See
+[How a breakdown closes](#how-a-breakdown-closes).
+
 ## What the extension does to your context
 
 | Hook | What it does | Why |
@@ -166,28 +180,113 @@ the KV cache only across a matching prefix, so rewriting the middle of the
 history forces a recompute of everything after the edit point. One large edit at
 a threshold keeps the prefix stable on every other turn.
 
-If compaction fires routinely inside a single task, the task is too coarse.
-Split it before reaching for compression.
+If compaction fires routinely inside a single task, the task is too coarse. The
+loop notices — compaction is one of the two signals that mark a task as having
+overrun its budget. See
+[Keeping the bottom level atomic](#keeping-the-bottom-level-atomic).
 
 ## Writing a good queue
 
 Order is priority order — the loop always takes the **first incomplete leaf**.
-Dotted ids imply hierarchy, so `api.route` is a child of `api`. Parents are
-never handed to the model; a parent's work is its children, and prompting with
-an interior node is how a bounded task becomes a forty-turn run. A parent rolls
-up to `done` on its own once every child is done.
+Parents are never handed to the model as work; a parent's work is its children,
+and a parent rolls up to `done` on its own once every child is done.
+
+Hierarchy comes from an explicit `parent`, or from dotted ids when `parent` is
+absent (`api.route` is a child of `api`). Both work, and they mix; the explicit
+field wins. Use it when your ids are not hierarchical:
 
 ```toml
 [[task]]
-id = "api.route"
-title = "Add GET /health returning 200"
+id = "rotate-secrets"
+title = "Rotate the signing secrets on boot"
+parent = "harden-auth"
 status = "todo"
 attempts = 0
-detail = """
-Return a JSON body with `status` and `uptime`. Register it on the existing
-router in server.ts. No new dependencies.
-"""
 ```
+
+### Levels — task, scope, epic
+
+`level` says how big an item is, and therefore what *working* it means:
+
+- **`task`** (the default) — atomic and implementable as written. This is the
+  only level that writes code.
+- **`scope`** — not yet implementable. Working it means reading the code to find
+  out what actually needs to happen, then adding the concrete tasks it breaks
+  into. A scope produces queue entries, not code.
+- **`epic`** — a spanning feature. Working it means adding `scope` children where
+  the shape is still unclear and `task` children where the work is already clear.
+
+**An epic spawns scopes, a scope spawns tasks, a task spawns code.** You do not
+have to decompose anything up front: drop an epic in the queue and the loop
+breaks it down as its first assignment.
+
+A childless scope or epic is a *breakdown* assignment. Once it has children it is
+a container — never prompted again, closed by roll-up. Levels are optional and
+backwards compatible: an item with children and no `level` is a container, which
+is what a parent has always been here, so existing queues need no edit.
+
+```toml
+[[task]]
+id = "auth"
+title = "Rebuild authentication"
+level = "epic"
+status = "todo"
+attempts = 0
+```
+
+### How a breakdown closes
+
+Nothing about it is a judgement call, so no model is asked and nothing leaves the
+machine. `todo_complete` on a scope or an epic checks:
+
+- children exist — at least `decompose.min_children` of them for an **epic**;
+  a **scope** may return a single task, because "it turns out to be one task" is
+  a real answer to an open question
+- each child's level is one the parent may spawn
+- each child's title can stand on its own
+- no cycles
+- **the working tree is unchanged**
+
+That last one is the same hard failure as an implementation task's empty diff,
+inverted. "A scope produces todos, not code" is enforced, not requested.
+
+### Keeping the bottom level atomic
+
+A leaf task has to fit in one session of a model with no memory of any other
+session. The breakdown prompt states that as tests the model can actually apply
+rather than an adjective — name the files it touches, count them against
+`atomic.max_files`, no "and" in the description, self-contained detail,
+verifiable from the diff alone. If it cannot name the files, it is still a scope.
+
+Prompting alone would not hold that line, so the loop also measures it. Two
+signals mark a task as having overrun its budget:
+
+- **compaction fired inside a single task** — the worker ran out of room in work
+  that was supposed to fit in one session, which is the loudest signal available
+- **the diff touched more than `atomic.max_files` files**
+
+Overflow is never a failure by itself: the work may be perfectly correct, and
+only the size is in question. What happens next is `atomic.on_overflow`:
+
+```toml
+[atomic]
+max_files = 5
+on_overflow = "warn"      # or "promote", or "off"
+```
+
+`warn` (the default) records it on the task, and `todo status` and `todo doctor`
+surface it:
+
+```
+! tasks that ran over budget: api.route (touched 11 files (budget 5)) — these
+  were not atomic. Split them, or set atomic.on_overflow = "promote" to have the
+  loop break them down itself.
+```
+
+`promote` closes the loop: a task that overran its budget **and** failed
+verification is turned into a scope and broken down on the next pass, instead of
+spending two more attempts re-running the same oversized prompt. It only fires on
+failure — oversized work that verified fine is left alone and merely flagged.
 
 ## Configuration
 
@@ -210,6 +309,12 @@ matter most:
   becoming an unbounded token burn.
 - `loop.checkpoint` — `commit` (default), `require-clean`, or `off`.
 - `loop.on_silent_stop` — `halt` (default) or `retry`.
+- `decompose.min_children` — smallest breakdown accepted **from an epic**,
+  default 2. Scopes are exempt; see
+  [How a breakdown closes](#how-a-breakdown-closes).
+- `atomic.max_files` / `atomic.on_overflow` — the bottom-level size budget and
+  what to do when a task blows through it. See
+  [Keeping the bottom level atomic](#keeping-the-bottom-level-atomic).
 
 ## Commands
 
@@ -236,15 +341,15 @@ rejected.
 ## Tests
 
 ```bash
-node --test test/      # 91 tests, no model required
+node --test test/      # 135 tests, no model required
 npx tsc                # type-checks src, extension and tests
 ```
 
 The suite covers the TOML round-trip, leaf selection and roll-up, prompt
 rendering, git evidence collection against a real temporary repository, the
 verdict parser against the shapes local models actually emit, queue-shape
-auditing, provider resolution and credential lookup against a stub endpoint, and
-the CLI end to end in `--dry-run`.
+auditing, provider resolution and credential lookup against a stub endpoint,
+levels and the breakdown gate, and the CLI end to end in `--dry-run`.
 
 There is also a live check that needs a running model:
 
@@ -252,10 +357,20 @@ There is also a live check that needs a running model:
 node scripts/live-extension-check.ts        # add --keep to inspect the workspace
 ```
 
-It drives the extension inside a real pi session over RPC with a two-task queue,
-which exercises the part the fakes cannot: that `newSession` works from a
-command, that the `/todo-advance` a tool queues is actually dispatched, and that
-the tools reach the model at all. It reports any `extension_error` pi emits.
+It drives the extension inside a real pi session over RPC with a mixed queue — a
+plain task and a scope — which exercises the part the fakes cannot: that
+`newSession` works from a command, that the `/todo-advance` a tool queues is
+actually dispatched, and that the tools reach the model at all. It reports any
+`extension_error` pi emits.
+
+The scope is there for a second reason. A fake API will accept a breakdown no
+real model would produce, so the check prints the children the model invents,
+with their details, for you to read. **Whether a small model decomposes *well* is
+not something the mechanical gate can answer** — it catches empty breakdowns,
+code in a breakdown and illegal levels, but a well-formed and useless breakdown
+passes. That is the same class of failure the model verifier exists to catch on
+the implementation side, and it is the one assumption in the level design that is
+still unvalidated. Read the output before trusting a long queue of epics to it.
 
 The extension is driven against a fake pi API, so the wiring that only exists at
 runtime is covered too: which hook fires when, that a rejection resumes the

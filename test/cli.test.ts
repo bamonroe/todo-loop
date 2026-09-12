@@ -99,13 +99,30 @@ test("block then reset", async () => {
 });
 
 test("run --dry-run drives the queue without launching a model", async () => {
+	const before = loadStore(path.join(workspace, "todo.toml"));
 	const result = await todo("run", "--dry-run", "--max", "5");
 	assert.equal(result.code, 0);
 	assert.match(result.stdout, /would run pi with prompt/);
 	assert.match(result.stdout, /queue empty/);
-	const store = loadStore(path.join(workspace, "todo.toml"));
-	assert.equal(store.loop.running, false);
-	assert.equal(store.tasks.every((task) => task.status === "done"), true);
+
+	// A dry run prints prompts. It used to also mark every task done, which made
+	// previewing a queue destroy it — and would commit a dirty tree on the way.
+	const after = loadStore(path.join(workspace, "todo.toml"));
+	assert.deepEqual(
+		after.tasks.map((task) => `${task.id}=${task.status}`),
+		before.tasks.map((task) => `${task.id}=${task.status}`),
+	);
+	assert.equal(after.loop.running, before.loop.running);
+});
+
+test("--dry-run previews a breakdown as a breakdown", async () => {
+	assert.equal((await todo("add", "auth", "Rebuild the authentication system", "--level", "epic")).code, 0);
+	// The epic is last in the queue, so the dry run has to walk to it.
+	const result = await todo("run", "--dry-run", "--max", "20");
+	assert.match(result.stdout, /break down epic — auth/);
+	assert.match(result.stdout, /You are \*\*not\*\* implementing it/);
+	// Still untouched afterwards.
+	assert.equal(loadStore(path.join(workspace, "todo.toml")).tasks.at(-1)?.status, "todo");
 });
 
 test("unknown commands report usage", async () => {

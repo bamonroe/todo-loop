@@ -54,6 +54,28 @@ commit_prefix = "todo"
 # still bounded by verify.max_attempts.
 on_silent_stop = "halt"
 
+[decompose]
+# Smallest breakdown accepted from a scope or an epic. One child is a rename,
+# not a breakdown — a scope that turns out to be a single atomic task should be
+# blocked instead, and the prompt says so.
+min_children = 2
+
+[atomic]
+# A leaf task whose diff touches more files than this was probably not atomic.
+# Recorded as an overflow, never failed on its own: the work may be correct and
+# only the size is in question.
+max_files = 5
+
+# What to do when a task overruns its budget — too many files, or compaction
+# firing inside a single task.
+#   warn    record it on the task; `todo doctor` and `todo status` show it
+#   promote turn it into a scope so the next pass breaks it down
+#   off     ignore
+# "promote" only acts when the task *also* failed verification, on the grounds
+# that failed-and-oversized is far more likely to be a queue bug than a worker
+# that nearly got there.
+on_overflow = "warn"
+
 [context]
 # Start eliding old tool results once context passes this fraction of the
 # window. One big edit at a threshold beats trimming every turn: rewriting the

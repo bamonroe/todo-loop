@@ -163,7 +163,7 @@ beforeEach(() => {
 
 test("registers the documented commands and tools", () => {
 	assert.deepEqual([...h.commands.keys()].sort(), ["todo-advance", "todo-run", "todo-status", "todo-stop"]);
-	assert.deepEqual([...h.tools.keys()].sort(), ["todo_block", "todo_complete"]);
+	assert.deepEqual([...h.tools.keys()].sort(), ["todo_add", "todo_block", "todo_complete"]);
 	for (const event of ["before_agent_start", "context", "tool_result", "session_before_compact", "agent_settled"]) {
 		assert.ok(h.events.has(event), `missing handler for ${event}`);
 	}
@@ -184,7 +184,7 @@ test("the task is pinned into the system prompt", async () => {
 	await run("todo-run");
 	const result = (await h.emit("before_agent_start", { systemPrompt: "BASE" })) as { systemPrompt: string };
 	assert.match(result.systemPrompt, /^BASE/);
-	assert.match(result.systemPrompt, /greet: Add a greet function/);
+	assert.match(result.systemPrompt, /greet \[task\]: Add a greet function/);
 });
 
 test("a passing verdict closes the task and queues the advance", async () => {
@@ -334,7 +334,7 @@ test("compaction returns fields rather than prose", async () => {
 
 	assert.equal(result.compaction.firstKeptEntryId, "entry-9");
 	assert.equal(result.compaction.tokensBefore, 12345);
-	assert.match(result.compaction.summary, /task:\s+greet: Add a greet function/);
+	assert.match(result.compaction.summary, /task:\s+greet \[task\]: Add a greet function/);
 	assert.match(result.compaction.summary, /attempt:\s+2 of 3/);
 	assert.match(result.compaction.summary, /files_touched:.*greet\.ts/);
 	assert.match(result.compaction.summary, /last_failure:\s+the export is missing/);
@@ -382,4 +382,158 @@ test("the loop reports an empty queue instead of spinning", async () => {
 
 	assert.equal(store().loop.running, false);
 	assert.match(h.notifications.join("\n"), /Queue empty/);
+});
+
+// ------------------------------------------------------ levels and breakdowns
+
+/** Rebuild the harness with an epic at the head of the queue. */
+function withEpic(overrides = ""): void {
+	fs.writeFileSync(
+		path.join(h.repo, "todo.toml"),
+		`
+[loop]
+running = false
+current = ""
+iterations = 0
+
+[[task]]
+id = "auth"
+title = "Rebuild authentication"
+level = "epic"
+status = "todo"
+attempts = 0
+`,
+	);
+	if (overrides) fs.writeFileSync(path.join(h.repo, "todoloop.toml"), CONFIG + overrides);
+}
+
+test("a childless epic is handed out as a breakdown, not as work", async () => {
+	withEpic();
+	await run("todo-run");
+	assert.equal(h.newSessions.length, 1);
+	assert.match(h.newSessions[0], /You are \*\*not\*\* implementing it/);
+	assert.match(h.newSessions[0], /todo_add/);
+});
+
+test("todo_add files children under the epic", async () => {
+	withEpic();
+	await run("todo-run");
+	const first = await call("todo_add", { title: "Rotate the signing secrets", detail: "Touch src/keys.ts only." });
+	assert.equal(first.isError, undefined);
+	await call("todo_add", { title: "Add a TOTP second factor", detail: "New file src/mfa.ts.", level: "scope" });
+
+	const tasks = store().tasks;
+	assert.deepEqual(
+		tasks.map((t) => t.id),
+		["auth", "auth.rotate-the-signing-secrets", "auth.add-a-totp-second-factor"],
+	);
+	assert.equal(tasks[1].parent, "auth");
+	assert.equal(tasks[1].detail, "Touch src/keys.ts only.");
+	assert.equal(tasks[2].level, "scope");
+});
+
+test("todo_add refuses on an ordinary task", async () => {
+	await run("todo-run"); // the default queue head, "greet", is a plain task
+	const result = await call("todo_add", { title: "Something else entirely", detail: "..." });
+	assert.equal(result.isError, true);
+	assert.match(JSON.stringify(result.content), /is a task, not a breakdown/);
+	assert.equal(store().tasks.length, 2);
+});
+
+test("a breakdown closes with no model call and no test run", async () => {
+	withEpic();
+	await run("todo-run");
+	await call("todo_add", { title: "Rotate the signing secrets", detail: "src/keys.ts" });
+	await call("todo_add", { title: "Add a TOTP second factor", detail: "src/mfa.ts" });
+
+	// Any verdict the fake model would return is the wrong answer here; the
+	// breakdown must be decided without asking it at all.
+	h.verdict = '{"pass": false, "reason": "the model should never have been consulted"}';
+	const result = await call("todo_complete", { summary: "split into two" });
+
+	assert.equal(result.terminate, true);
+	assert.equal(result.isError, undefined);
+	assert.equal(store().tasks[0].status, "done");
+	assert.equal(result.usage, undefined);
+});
+
+test("a breakdown that touched the tree is rejected", async () => {
+	withEpic();
+	await run("todo-run");
+	await call("todo_add", { title: "Rotate the signing secrets", detail: "src/keys.ts" });
+	await call("todo_add", { title: "Add a TOTP second factor", detail: "src/mfa.ts" });
+	writeWork(); // a scope that wrote code
+
+	const result = await call("todo_complete", { summary: "split it and got started" });
+	assert.equal(result.isError, true);
+	assert.match(JSON.stringify(result.content), /not code/);
+	assert.equal(store().tasks[0].status, "doing");
+});
+
+test("an empty breakdown is rejected without consulting the verifier", async () => {
+	withEpic();
+	await run("todo-run");
+	const result = await call("todo_complete", { summary: "nothing to split" });
+	assert.equal(result.isError, true);
+	assert.match(JSON.stringify(result.content), /no child tasks/);
+});
+
+test("compaction inside a task flags it as too coarse", async () => {
+	await run("todo-run");
+	writeWork();
+	await h.emit("session_before_compact", {
+		preparation: { firstKeptEntryId: "e1", tokensBefore: 9000 },
+	});
+	await call("todo_complete", { summary: "done" });
+
+	const done = store().tasks[0];
+	assert.equal(done.overflowed, true);
+	assert.match(done.overflow_reason ?? "", /compaction fired/);
+	// Passing is still passing: size is a separate question from correctness.
+	assert.equal(done.status, "done");
+});
+
+test("with on_overflow = promote, an oversized failure becomes a scope", async () => {
+	fs.writeFileSync(path.join(h.repo, "todoloop.toml"), `${CONFIG}\n[atomic]\non_overflow = "promote"\nmax_files = 5\n`);
+	await run("todo-run");
+	writeWork();
+	await h.emit("session_before_compact", { preparation: { firstKeptEntryId: "e1", tokensBefore: 9000 } });
+
+	h.verdict = '{"pass": false, "reason": "greet is still not exported"}';
+	const result = await call("todo_complete", { summary: "tried" });
+
+	assert.equal(result.terminate, true);
+	const task = store().tasks[0];
+	assert.equal(task.level, "scope");
+	assert.equal(task.status, "todo");
+	assert.equal(task.attempts, 0);
+	assert.deepEqual(h.sent, [{ text: "/todo-advance", options: { deliverAs: "followUp", expandPromptTemplates: true } }]);
+});
+
+test("the default is to warn, not to restructure the queue", async () => {
+	await run("todo-run");
+	writeWork();
+	await h.emit("session_before_compact", { preparation: { firstKeptEntryId: "e1", tokensBefore: 9000 } });
+	h.verdict = '{"pass": false, "reason": "greet is still not exported"}';
+	await call("todo_complete", { summary: "tried" });
+
+	const task = store().tasks[0];
+	assert.equal(task.level, undefined);
+	assert.equal(task.overflowed, true);
+	assert.equal(task.attempts, 1);
+});
+
+test("a breakdown carries its children across compaction", async () => {
+	withEpic();
+	await run("todo-run");
+	await call("todo_add", { title: "Rotate the signing secrets", detail: "src/keys.ts" });
+
+	const result = (await h.emit("session_before_compact", {
+		preparation: { firstKeptEntryId: "e1", tokensBefore: 9000 },
+	})) as { compaction: { summary: string } };
+
+	// Without this the worker forgets what it already added and duplicates it.
+	assert.match(result.compaction.summary, /children_added: auth\.rotate-the-signing-secrets/);
+	assert.match(result.compaction.summary, /Do not re-add children/);
+	assert.match(result.compaction.summary, /Write no code/);
 });

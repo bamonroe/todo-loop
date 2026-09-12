@@ -7,9 +7,15 @@
  * newSession works from a command, that the queued /todo-advance is dispatched,
  * and that the tools are visible to the model at all.
  *
+ * The queue is deliberately mixed: a plain task first, then a scope. That covers
+ * both assignment kinds and, more to the point, exercises todo_add against a
+ * real model — the fake API will happily accept a breakdown no local model would
+ * actually produce. The children it invents are printed at the end, because
+ * whether a small model decomposes *well* is a judgement only a human can make.
+ *
  * Needs a live model, so it is not part of `node --test`. Run it directly:
  *
- *   node scripts/live-extension-check.ts [--keep] [--timeout 1800]
+ *   node scripts/live-extension-check.ts [--keep] [--timeout 2700]
  */
 
 import { spawn } from "node:child_process";
@@ -23,7 +29,7 @@ const PACKAGE_ROOT = path.join(import.meta.dirname, "..");
 
 const args = process.argv.slice(2);
 const keep = args.includes("--keep");
-const timeoutMs = Number(args[args.indexOf("--timeout") + 1] || 1800) * 1000;
+const timeoutMs = Number(args[args.indexOf("--timeout") + 1] || 2700) * 1000;
 
 const QUEUE = `
 [loop]
@@ -44,14 +50,20 @@ Plain TypeScript, type annotations only, run directly by node. No test file need
 """
 
 [[task]]
-id = "shout"
-title = "Add a shout function"
+id = "transforms"
+title = "Add the text transform helpers"
+level = "scope"
 status = "todo"
 attempts = 0
 detail = """
-Create shout.ts exporting \`shout(text: string): string\` returning the text
-uppercased with an exclamation mark appended.
-Plain TypeScript, type annotations only, run directly by node. No test file needed.
+Two helpers are needed, and they belong in separate files:
+
+- shout.ts exporting \`shout(text: string): string\` — the text uppercased with
+  an exclamation mark appended.
+- whisper.ts exporting \`whisper(text: string): string\` — the text lowercased,
+  wrapped in parentheses.
+
+Plain TypeScript, type annotations only, run directly by node. No test files.
 """
 `;
 
@@ -157,13 +169,19 @@ await sleep(1000);
 child.kill();
 
 const store = loadStore(path.join(repo, "todo.toml"));
-const created = ["greet.ts", "shout.ts"].filter((file) => fs.existsSync(path.join(repo, file)));
+const created = ["greet.ts", "shout.ts", "whisper.ts"].filter((file) => fs.existsSync(path.join(repo, file)));
+const spawned = store.tasks.filter((task) => task.parent === "transforms");
 const commits = execFileSync("git", ["log", "--oneline"], { cwd: repo, encoding: "utf8" }).trim().split("\n");
 
 console.log("\n--- result ---");
 console.log(`outcome:          ${outcome}`);
 for (const task of store.tasks) console.log(`  ${task.id}: ${task.status} (${task.attempts} attempts)`);
 console.log(`files created:    ${created.join(", ") || "(none)"}`);
+console.log(`breakdown:        ${spawned.length} child task(s) from the scope`);
+for (const task of spawned) {
+	console.log(`  - ${task.id} [${task.level ?? "task"}] ${task.status}: ${task.title}`);
+	if (task.detail) console.log(`      ${task.detail.trim().replace(/\n/g, "\n      ")}`);
+}
 console.log(`commits:          ${commits.length}`);
 console.log(`last failure:     ${store.loop.last_failure || "(none)"}`);
 console.log(`extension errors: ${extensionErrors.length}`);
@@ -171,8 +189,11 @@ console.log(`extension errors: ${extensionErrors.length}`);
 if (!keep) fs.rmSync(repo, { recursive: true, force: true });
 else console.log(`\nkept ${repo}`);
 
-// Two tasks means the automatic advance — a tool queueing a command that
-// replaces the session — is exercised for real, not just the first kickoff.
-const passed = outcome === "done" && created.length === 2 && extensionErrors.length === 0;
+// More than one task means the automatic advance — a tool queueing a command
+// that replaces the session — is exercised for real, not just the first kickoff.
+// A non-empty breakdown means todo_add reached the model and the mechanical gate
+// accepted what came back.
+const passed =
+	outcome === "done" && created.length === 3 && spawned.length > 0 && extensionErrors.length === 0;
 console.log(passed ? "\nPASS" : "\nFAIL");
 process.exit(passed ? 0 : 1);
