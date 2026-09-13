@@ -68,23 +68,36 @@ export const REMOTE_PROVIDERS: Record<string, RemoteProvider> = {
 	},
 };
 
-/** pi's credential store, so a key set up once with pi is not set up again here. */
-export function piAuthKey(provider: string): string | undefined {
+function readPiAuth(): Record<string, unknown> | undefined {
 	const home = process.env.HOME;
 	if (!home) return undefined;
 	const file = path.join(process.env.PI_CONFIG_DIR ?? path.join(home, ".pi", "agent"), "auth.json");
 	try {
-		const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
-		const entry = parsed[provider];
-		if (typeof entry === "string") return entry.trim() || undefined;
-		if (entry && typeof entry === "object") {
-			const key = (entry as { key?: unknown }).key;
-			if (typeof key === "string" && key.trim()) return key;
-		}
+		return JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
 	} catch {
 		// No auth file, or not readable. Environment variables are still an option.
+		return undefined;
+	}
+}
+
+/** pi's credential store, so a key set up once with pi is not set up again here. */
+export function piAuthKey(provider: string): string | undefined {
+	const entry = readPiAuth()?.[provider];
+	if (typeof entry === "string") return entry.trim() || undefined;
+	if (entry && typeof entry === "object") {
+		const key = (entry as { key?: unknown }).key;
+		if (typeof key === "string" && key.trim()) return key;
 	}
 	return undefined;
+}
+
+/**
+ * Providers pi holds credentials for, whatever their shape. A subscription
+ * login stores an OAuth entry with no `key` field, so `piAuthKey` cannot answer
+ * "is this provider usable" for the worker — only pi itself uses that token.
+ */
+export function piAuthProviders(): string[] {
+	return Object.keys(readPiAuth() ?? {});
 }
 
 export function resolveApiKey(provider: string): string | undefined {

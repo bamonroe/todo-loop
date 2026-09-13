@@ -20,7 +20,7 @@ Run from the project root, which must be a git repository.
 
 ```bash
 todo init      # writes todo.toml (the queue) and todoloop.toml (models, thresholds)
-todo doctor    # checks Ollama, the verifier credentials, git, and the queue shape
+todo doctor    # checks both models are reachable, plus git and the queue shape
 ```
 
 ### Choosing the build and test commands
@@ -125,8 +125,9 @@ carries stale context between tasks. Never start a loop in a session being used
 for something else.
 
 In-session, the worker is **whatever model the session is on**. `models.worker`
-in `todoloop.toml` is ignored entirely and only the shell driver reads it. Check
-the status bar before starting.
+in `todoloop.toml` is only read by the shell driver — the extension cannot set a
+model on a session it is in the middle of replacing. `/todo-run` warns when the
+two disagree, but it does not switch: use `/model` first if you meant to.
 
 **Shell driver**, one process per task:
 
@@ -134,7 +135,11 @@ the status bar before starting.
 todo run --dry-run     # prints every prompt, calls no model, writes nothing
 todo run               # the real thing
 todo run --max 3
+todo run --model ollama/qwen3.8-27b   # override models.worker for this run
 ```
+
+The dry run names the model each task would go to, so a wrong `models.worker` is
+something you read rather than something you pay for.
 
 Start a new queue with `--dry-run`. It walks the queue in memory and will not
 mark tasks done or commit.

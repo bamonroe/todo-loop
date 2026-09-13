@@ -102,7 +102,7 @@ test("run --dry-run drives the queue without launching a model", async () => {
 	const before = loadStore(path.join(workspace, "todo.toml"));
 	const result = await todo("run", "--dry-run", "--max", "5");
 	assert.equal(result.code, 0);
-	assert.match(result.stdout, /would run pi with prompt/);
+	assert.match(result.stdout, /would run pi \(.+\) with prompt/);
 	assert.match(result.stdout, /queue empty/);
 
 	// A dry run prints prompts. It used to also mark every task done, which made
@@ -113,6 +113,20 @@ test("run --dry-run drives the queue without launching a model", async () => {
 		before.tasks.map((task) => `${task.id}=${task.status}`),
 	);
 	assert.equal(after.loop.running, before.loop.running);
+});
+
+test("a dry run names the model the real run would use", async () => {
+	// Which model the loop is about to spend tokens on is otherwise invisible
+	// until it has spent them.
+	const configured = await todo("run", "--dry-run", "--max", "1");
+	assert.match(configured.stdout, /would run pi \(openai-codex\/gpt-5\.6-terra\) with prompt/);
+
+	const overridden = await todo("run", "--dry-run", "--max", "1", "--model", "ollama/qwen3.8-27b");
+	assert.match(overridden.stdout, /would run pi \(ollama\/qwen3\.8-27b\) with prompt/);
+
+	// --provider alone re-points the configured model at another host.
+	const rehosted = await todo("run", "--dry-run", "--max", "1", "--provider", "opencode");
+	assert.match(rehosted.stdout, /would run pi \(opencode\/gpt-5\.6-terra\) with prompt/);
 });
 
 test("--dry-run previews a breakdown as a breakdown", async () => {

@@ -2,13 +2,17 @@
 # don't need to change.
 
 [models]
-# The worker. Only the shell driver reads this — in-session the loop uses
-# whatever model the pi session is already on.
+# The worker, as "provider/model". Only the shell driver reads this — in-session
+# the loop uses whatever model the pi session is already on, and /todo-run says
+# so when the two disagree.
 #
-# "inherit" uses pi's own configured default. Prefer it: pi's --model flag reads
-# a trailing ":suffix" as a thinking level, so an ollama tag like
-# "qwen3.8-27b:52k" cannot be passed through the flag at all.
-worker = "inherit"
+# `todo --provider <name>` and `todo --model <id>` override this for one run, so
+# trying another model does not mean editing the file.
+#
+# "inherit" uses pi's own configured default instead. Use it for a local worker:
+# pi's --model flag reads a trailing ":suffix" as a thinking level, so an ollama
+# tag like "qwen3.8-27b:52k" cannot be passed through the flag at all.
+worker = "openai-codex/gpt-5.6-terra"
 # The verifier. Keep it different from the worker: a model judging its own
 # output is the weakest version of this check. The verify call is short, so a
 # small model is fine here.

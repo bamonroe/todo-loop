@@ -112,7 +112,7 @@ function build(): Harness {
 		hasUI: true,
 		signal: undefined,
 		ui: { notify: (message: string) => harness.notifications.push(message) },
-		model: { contextWindow: 1000 },
+		model: { provider: "ollama", id: "fake-worker", contextWindow: 1000 },
 		getContextUsage: () => ({ tokens: 900, percent: 90, contextWindow: 1000 }),
 		modelRegistry: {
 			find: () => ({ id: "fake-verifier" }),
@@ -178,6 +178,32 @@ test("todo-run claims the first leaf and kicks off a fresh session", async () =>
 	assert.equal(h.newSessions.length, 1);
 	assert.match(h.newSessions[0], /Add a greet function/);
 	assert.match(h.newSessions[0], /todo_complete/);
+});
+
+test("a worker model the session is not on is called out at the start of the run", async () => {
+	// models.worker binds the shell driver; in-session the loop runs on whatever
+	// model the session already has. Silence here means discovering overnight
+	// that the queue ran on something else entirely.
+	fs.writeFileSync(
+		path.join(h.repo, "todoloop.toml"),
+		CONFIG.replace('worker = "inherit"', 'worker = "openai-codex/gpt-5.6-terra"'),
+	);
+	await run("todo-run");
+	const warning = h.notifications.find((message) => message.includes("models.worker"));
+	assert.ok(warning, `no worker-model warning in ${JSON.stringify(h.notifications)}`);
+	assert.match(warning, /openai-codex\/gpt-5\.6-terra/);
+	assert.match(warning, /ollama\/fake-worker/);
+	// Still a warning, not a refusal — the run goes ahead.
+	assert.equal(h.newSessions.length, 1);
+});
+
+test("a worker model matching the session's is left unmentioned", async () => {
+	fs.writeFileSync(path.join(h.repo, "todoloop.toml"), CONFIG.replace('worker = "inherit"', 'worker = "ollama/fake-worker"'));
+	await run("todo-run");
+	assert.equal(
+		h.notifications.find((message) => message.includes("models.worker")),
+		undefined,
+	);
 });
 
 test("the task is pinned into the system prompt", async () => {

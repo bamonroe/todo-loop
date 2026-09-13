@@ -10,8 +10,12 @@ import { parseToml } from "./toml.ts";
 export interface Config {
 	models: {
 		/**
-		 * Worker model for the shell driver, or "inherit" to use whatever pi is
-		 * already configured to use. In-session the loop always uses the active model.
+		 * Worker model, as "provider/model". Both loop shapes honour it: the shell
+		 * driver passes it to `pi -p`, and in-session the extension sets it on each
+		 * fresh session. "inherit" leaves whatever pi is already configured to use.
+		 *
+		 * `todo --provider` and `todo --model` override it for a single run, so the
+		 * default here is a starting point rather than a commitment.
 		 *
 		 * Note that pi's `--model` flag reads a trailing `:suffix` as a thinking
 		 * level, so an ollama tag like `qwen3.8-27b:52k` cannot be passed through
@@ -85,7 +89,7 @@ export interface Config {
 
 export const DEFAULT_CONFIG: Config = {
 	models: {
-		worker: "inherit",
+		worker: "openai-codex/gpt-5.6-terra",
 		verifier: "opencode/qwen3.6-plus",
 	},
 	verify: {
@@ -218,20 +222,34 @@ export function loadConfig(cwd: string, file?: string): Config {
 	return parseConfig(fs.readFileSync(resolved, "utf8"));
 }
 
-/** True when the worker model should be left to pi's own configuration. */
-export function inheritsWorker(config: Config): boolean {
-	const worker = config.models.worker.trim();
-	return worker === "" || worker === "inherit";
+/** True when a model reference defers to pi's own configuration. */
+export function isInheritRef(ref: string): boolean {
+	const trimmed = ref.trim();
+	return trimmed === "" || trimmed === "inherit";
 }
 
-/** pi's configured default model, used only for diagnostics. */
-export function piDefaultModel(): string | undefined {
+/** True when the worker model should be left to pi's own configuration. */
+export function inheritsWorker(config: Config): boolean {
+	return isInheritRef(config.models.worker);
+}
+
+/**
+ * pi's configured default, as a "provider/model" reference.
+ *
+ * Both halves matter: `defaultModel` is a bare id, so reading it alone makes
+ * every inherited worker look like an ollama tag. Used only for diagnostics.
+ */
+export function piDefaultRef(): string | undefined {
 	const home = process.env.HOME;
 	if (!home) return undefined;
 	const file = path.join(process.env.PI_CONFIG_DIR ?? path.join(home, ".pi", "agent"), "settings.json");
 	try {
-		const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { defaultModel?: string };
-		return typeof parsed.defaultModel === "string" ? parsed.defaultModel : undefined;
+		const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { defaultModel?: string; defaultProvider?: string };
+		const model = typeof parsed.defaultModel === "string" ? parsed.defaultModel.trim() : "";
+		if (!model) return undefined;
+		if (model.includes("/")) return model;
+		const provider = typeof parsed.defaultProvider === "string" ? parsed.defaultProvider.trim() : "";
+		return provider ? `${provider}/${model}` : model;
 	} catch {
 		return undefined;
 	}
@@ -242,4 +260,33 @@ export function splitModelRef(ref: string): { provider: string; model: string } 
 	const cut = ref.indexOf("/");
 	if (cut < 0) return { provider: "ollama", model: ref };
 	return { provider: ref.slice(0, cut), model: ref.slice(cut + 1) };
+}
+
+/** True when a reference is served by a local ollama rather than over the network. */
+export function isLocalRef(ref: string): boolean {
+	return splitModelRef(ref).provider === "ollama";
+}
+
+/**
+ * Merge `--provider` and `--model` onto a configured worker reference.
+ *
+ * Either flag alone is enough. `--model` may carry its own "provider/" prefix,
+ * in which case it decides both halves; otherwise the missing half comes from
+ * the configured worker, or from the built-in default when that is "inherit"
+ * — there is nothing to merge a half-override into.
+ */
+export function applyWorkerOverride(worker: string, provider?: string, model?: string): string {
+	const wantProvider = provider?.trim();
+	const wantModel = model?.trim();
+	if (!wantProvider && !wantModel) return worker;
+	if (wantModel?.includes("/")) return wantModel;
+	const base = splitModelRef(isInheritRef(worker) ? DEFAULT_CONFIG.models.worker : worker);
+	return `${wantProvider ?? base.provider}/${wantModel ?? base.model}`;
+}
+
+/** A copy of the config with the worker reference overridden, or the original when nothing changed. */
+export function withWorkerOverride(config: Config, provider?: string, model?: string): Config {
+	const worker = applyWorkerOverride(config.models.worker, provider, model);
+	if (worker === config.models.worker) return config;
+	return { ...config, models: { ...config.models, worker } };
 }
