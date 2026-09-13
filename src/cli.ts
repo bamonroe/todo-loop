@@ -10,15 +10,23 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { DEFAULT_CONFIG_FILE, inheritsWorker, loadConfig, splitModelRef, type Config } from "./config.ts";
+import {
+	DEFAULT_CONFIG_FILE,
+	inheritsWorker,
+	loadConfig,
+	splitModelRef,
+	withWorkerOverride,
+	type Config,
+} from "./config.ts";
 import { diagnose, formatChecks } from "./doctor.ts";
-import { commitAll, gatherEvidence, headCommit, isGitRepo, isTreeClean } from "./evidence.ts";
+import { commitAll, DEFAULT_EXCLUDES, gatherEvidence, headCommit, isGitRepo, isTreeClean } from "./evidence.ts";
 import { renderAssignmentPrompt } from "./prompt.ts";
 import { checkDecomposition } from "./decompose.ts";
 import {
 	allowedChildLevels,
 	assignmentFor,
 	counts,
+	createTask,
 	DEFAULT_STORE_FILE,
 	effectiveLevel,
 	findTask,
@@ -92,9 +100,39 @@ interface Env {
 
 function loadEnv(flags: Flags): Env {
 	const cwd = path.resolve(str(flags, "cwd", process.cwd()));
-	const config = loadConfig(cwd, str(flags, "config") || undefined);
+	// The worker comes from the config file, and --provider/--model override it
+	// here rather than in `run` alone, so `todo doctor` reports the model the run
+	// would actually use.
+	const config = withWorkerOverride(
+		loadConfig(cwd, str(flags, "config") || undefined),
+		str(flags, "provider") || undefined,
+		str(flags, "model") || undefined,
+	);
 	const storeFile = resolveStorePath(cwd, str(flags, "file") || undefined);
 	return { cwd, config, storeFile, store: loadStore(storeFile) };
+}
+
+/**
+ * Paths whose changes are the loop's bookkeeping rather than the task's work.
+ *
+ * The queue changes on every task, so showing it to the verifier makes a task
+ * that touched nothing else look like it did something. Which files those are
+ * depends on the schema — a project queue is three files, not one — so the list
+ * is built from the store rather than fixed.
+ */
+function queueExcludes(env: Env): string[] {
+	const relative = (file?: string): string | undefined => {
+		if (!file) return undefined;
+		const rel = path.relative(env.cwd, file);
+		return rel && !rel.startsWith("..") ? rel : undefined;
+	};
+	const paths = [
+		relative(env.storeFile),
+		relative(env.store.archive?.file),
+		relative(env.store.sidecarFile),
+		...DEFAULT_EXCLUDES,
+	];
+	return [...new Set(paths.filter((value): value is string => Boolean(value)))];
 }
 
 function verifierFor(env: Env, signal?: AbortSignal) {
@@ -110,6 +148,7 @@ async function evidenceFor(env: Env) {
 		requireTestsPass: env.config.verify.require_tests_pass,
 		timeoutMs: env.config.verify.timeout_ms,
 		maxBytes: env.config.verify.max_evidence_bytes,
+		exclude: queueExcludes(env),
 	});
 }
 
@@ -154,11 +193,12 @@ const USAGE = `todo — autonomous todo loop for pi
 
   todo init                      Write ${DEFAULT_CONFIG_FILE} and ${DEFAULT_STORE_FILE} starters
   todo doctor [--probe]          Check models, VRAM, git and queue shape
-  todo status                    Show the queue
+  todo status [--all]            Show the queue (--all includes archived work)
   todo stop                      Stop a running loop after the current task
   todo next [--id]               Print the next task's prompt (exit 3 when empty)
   todo start                     Claim the next task and print its prompt
-  todo add <id> <title...>       Append a task (--detail "...", --parent <id>, --level task|scope|epic)
+  todo add <id> <title...>       Append a task (--detail "...", --parent <id>, --level task|scope|epic,
+                                 --category <c>, --urgency <u> where the schema has them)
   todo done <id> [summary...]    Mark done without verifying
   todo block <id> <reason...>    Mark blocked
   todo reset <id>                Return a task to todo and clear attempts
@@ -167,7 +207,12 @@ const USAGE = `todo — autonomous todo loop for pi
   todo checkpoint [message...]   Commit everything in the working tree
   todo run [--max N] [--dry-run] Drive the queue with one pi process per task
 
-Shared flags: --cwd <dir> --file <todo.toml> --config <todoloop.toml>`;
+Shared flags: --cwd <dir> --file <todo.toml> --config <todoloop.toml>
+              --provider <name> --model <id>   override the configured worker
+
+With no --file, an existing TODO.toml or todo.toml in --cwd is adopted, and its
+schema is read from the file rather than assumed. \`todo status\` names the files
+it is working on.`;
 
 function commandInit(env: Env, flags: Flags): number {
 	const configPath = path.join(env.cwd, DEFAULT_CONFIG_FILE);
@@ -195,13 +240,29 @@ async function commandDoctor(env: Env, flags: Flags): Promise<number> {
 	return failures ? EXIT_ERROR : EXIT_OK;
 }
 
-function commandStatus(env: Env): number {
+/**
+ * Which files this queue is spread over.
+ *
+ * Worth printing every time rather than on request: the failure this heads off
+ * is the loop quietly adopting the wrong file — a fresh `todo.toml` beside the
+ * real `TODO.toml` — and reporting an empty queue with complete confidence.
+ */
+function queueLine(env: Env): string {
+	const shown = (file?: string): string => (file ? path.relative(env.cwd, file) || file : "");
+	const parts = [`${shown(env.storeFile)} (${env.store.schema.name} schema)`];
+	if (env.store.archive?.file) parts.push(`archive ${shown(env.store.archive.file)}`);
+	if (env.store.sidecarFile) parts.push(`state ${shown(env.store.sidecarFile)}`);
+	return `queue: ${parts.join(" · ")}`;
+}
+
+function commandStatus(env: Env, flags: Flags): number {
 	const stats = counts(env.store);
-	const tree = renderTree(env.store);
+	const tree = renderTree(env.store, { all: bool(flags, "all") });
 	console.log(tree || "(no tasks)");
 	console.log(
 		`\n${stats.done} done · ${stats.todo} todo · ${stats.doing} in progress · ${stats.blocked} blocked` +
 			(stats.pending_breakdowns ? ` · ${stats.pending_breakdowns} awaiting breakdown` : "") +
+			`\n${queueLine(env)}` +
 			`\nloop: ${env.store.loop.running ? "running" : "stopped"}` +
 			(env.store.loop.current ? ` · current ${env.store.loop.current}` : "") +
 			` · iteration ${env.store.loop.iterations}`,
@@ -262,10 +323,14 @@ function commandAdd(env: Env, flags: Flags): number {
 		return EXIT_ERROR;
 	}
 
-	const task: Task = { id, title: titleParts.join(" "), status: "todo", attempts: 0 };
-	const detail = str(flags, "detail");
-	if (detail) task.detail = detail;
-	if (levelRaw !== "task") task.level = levelRaw;
+	const task = createTask(env.store, {
+		id,
+		title: titleParts.join(" "),
+		detail: str(flags, "detail") || undefined,
+		level: levelRaw !== "task" ? levelRaw : undefined,
+		category: str(flags, "category") || undefined,
+		urgency: str(flags, "urgency") || undefined,
+	});
 
 	const parent = str(flags, "parent");
 	if (parent) {
@@ -419,20 +484,30 @@ interface PiRun {
 	output: string;
 }
 
-function runPi(env: Env, prompt: string, dryRun: boolean): Promise<PiRun> {
-	if (dryRun) {
-		console.log(`--- would run pi with prompt ---\n${prompt}\n--- end prompt ---`);
-		return Promise.resolve({ code: 0, output: "" });
-	}
+/**
+ * The pi invocation for one task, and a label for the model it will use.
+ *
+ * The label exists so a dry run says which model the real run would pick.
+ * Getting that wrong is otherwise invisible until the tokens are spent.
+ */
+export function workerArgs(config: Config, prompt: string): { args: string[]; model: string } {
 	// pi reads a trailing `:suffix` on --model as a thinking level, so an ollama
 	// tag like `qwen3.8-27b:52k` cannot round-trip through the flag. Inheriting
-	// pi's own default is both the safe path and usually what you want.
-	const args = inheritsWorker(env.config)
-		? ["-p", "--", prompt]
-		: (() => {
-				const { provider, model } = splitModelRef(env.config.models.worker);
-				return ["-p", "--provider", provider, "--model", model, "--", prompt];
-			})();
+	// pi's own default is the way out when that bites.
+	if (inheritsWorker(config)) return { args: ["-p", "--", prompt], model: "inherited from pi" };
+	const { provider, model } = splitModelRef(config.models.worker);
+	return {
+		args: ["-p", "--provider", provider, "--model", model, "--", prompt],
+		model: `${provider}/${model}`,
+	};
+}
+
+function runPi(env: Env, prompt: string, dryRun: boolean): Promise<PiRun> {
+	const { args, model } = workerArgs(env.config, prompt);
+	if (dryRun) {
+		console.log(`--- would run pi (${model}) with prompt ---\n${prompt}\n--- end prompt ---`);
+		return Promise.resolve({ code: 0, output: "" });
+	}
 	return new Promise((resolve) => {
 		// stdin must be closed: pi's print mode waits for EOF before it runs the
 		// prompt, so an inherited pipe makes it hang with the model loaded and idle.
@@ -582,7 +657,7 @@ export async function main(argv: string[]): Promise<number> {
 		case "init":
 			return commandInit(env, flags);
 		case "status":
-			return commandStatus(env);
+			return commandStatus(env, flags);
 		case "doctor":
 			return commandDoctor(env, flags);
 		case "stop":

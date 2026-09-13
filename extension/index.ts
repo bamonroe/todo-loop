@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { uuidv7, type Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { DEFAULT_CONFIG, loadConfig, splitModelRef, type Config } from "../src/config.ts";
+import { DEFAULT_CONFIG, inheritsWorker, loadConfig, splitModelRef, type Config } from "../src/config.ts";
 import {
 	changedFiles,
 	commitAll,
@@ -36,6 +36,7 @@ import {
 	assignmentFor,
 	childrenOf,
 	counts,
+	createTask,
 	findTask,
 	insertChildren,
 	levelOf,
@@ -279,6 +280,28 @@ export default function (pi: ExtensionAPI) {
 
 	// ---------------------------------------------------------------- commands
 
+	/**
+	 * In-session the worker is the session's own model — the loop replaces the
+	 * session on every advance, and the replacement takes pi's configured model,
+	 * not this extension's. So `models.worker` is a shell-driver setting here.
+	 *
+	 * Saying so once at the start beats letting a queue run overnight on a model
+	 * the config claims it is not using.
+	 */
+	const noteWorkerModel = (ctx: ExtensionContext): void => {
+		if (inheritsWorker(config)) return;
+		const want = splitModelRef(config.models.worker);
+		const active = ctx.model;
+		if (active && active.provider === want.provider && active.id === want.model) return;
+		const running = active ? `${active.provider}/${active.id}` : "the session's model";
+		say(
+			ctx,
+			`models.worker is ${config.models.worker}, but in-session the loop runs on ${running}. ` +
+				"Switch with /model, or ignore this — models.worker only binds the shell driver.",
+			"warning",
+		);
+	};
+
 	pi.registerCommand("todo-run", {
 		description: "Work todo.toml until the queue is empty",
 		handler: async (args, ctx) => {
@@ -288,6 +311,7 @@ export default function (pi: ExtensionAPI) {
 				say(ctx, "Nothing to do — no incomplete leaf tasks.", "warning");
 				return;
 			}
+			noteWorkerModel(ctx);
 			store.loop.running = true;
 			store.loop.iterations = 0;
 			if (args.trim() === "--fresh") store.loop.last_failure = "";
@@ -498,15 +522,16 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const id = uniqueId(store, params.id?.trim() || slugify(params.title), parent.id);
-			const child: Task = {
+			// Built through the factory so the row carries whatever metadata this
+			// file's schema gives every other row — a child the loop added should
+			// not be identifiable as such.
+			const child = createTask(store, {
 				id,
 				title: params.title.trim(),
-				status: "todo",
-				attempts: 0,
+				detail: params.detail.trim() || undefined,
 				parent: parent.id,
-			};
-			if (params.detail.trim()) child.detail = params.detail.trim();
-			if (level !== "task") child.level = level;
+				level: level !== "task" ? level : undefined,
+			});
 
 			insertChildren(store, parent.id, [child]);
 			write(store);

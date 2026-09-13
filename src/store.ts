@@ -659,6 +659,55 @@ export function counts(store: Store): Record<TaskStatus | "leaves" | "pending_br
 	return out as Record<TaskStatus | "leaves" | "pending_breakdowns", number>;
 }
 
+export interface NewTask {
+	id: string;
+	title: string;
+	detail?: string;
+	parent?: string;
+	level?: TaskLevel;
+	/** Project-schema metadata. Ignored by a schema that has no field for it. */
+	category?: string;
+	urgency?: string;
+}
+
+/** Next `order`, ten past the highest in use — the project CLI's own 10, 20, 30. */
+function nextOrder(store: Store): number {
+	let highest = 0;
+	for (const task of store.tasks) {
+		if (task.archived) continue;
+		const order = task.extra?.order;
+		if (typeof order === "number" && order > highest) highest = order;
+	}
+	return highest + 10;
+}
+
+/**
+ * A task in the shape the file already uses.
+ *
+ * Every writer of the queue goes through here, so a row the loop adds during a
+ * breakdown is indistinguishable from one added by hand or by the project's own
+ * CLI — same fields, same defaults, same order. A task that is missing the
+ * metadata its siblings all carry is the tell that a foreign tool has been in
+ * the file, and it makes the project's own `validate` the thing that catches it.
+ */
+export function createTask(store: Store, fields: NewTask): Task {
+	const task: Task = { id: fields.id, title: fields.title, status: "todo", attempts: 0 };
+	if (fields.detail) task.detail = fields.detail;
+	if (fields.parent) task.parent = fields.parent;
+	if (fields.level) task.level = fields.level;
+
+	if (store.schema.name === "project") {
+		task.extra = {
+			category: fields.category ?? "feature",
+			urgency: fields.urgency ?? "normal",
+			order: nextOrder(store),
+			created: todayRaw(),
+			tags: [],
+		};
+	}
+	return task;
+}
+
 export function markDoing(store: Store, task: Task, baseCommit: string): void {
 	task.status = "doing";
 	task.started_at = task.started_at ?? new Date().toISOString();

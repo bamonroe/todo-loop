@@ -7,15 +7,20 @@
  * every following task reloads it. That is two model loads per task, and on a
  * 16GB card with a 27B worker it dominates everything else. A hosted verifier
  * sidesteps it, at the cost of sending the diff off the machine.
+ *
+ * Neither role is local by assumption. A hosted worker has no ollama tag to
+ * pull and no VRAM to contend for, so the local checks have to be conditioned
+ * on where each model actually runs rather than run unconditionally.
  */
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { Config } from "./config.ts";
-import { inheritsWorker, piDefaultModel, splitModelRef } from "./config.ts";
+import { inheritsWorker, isLocalRef, piDefaultRef, splitModelRef } from "./config.ts";
 import { isGitRepo, isTreeClean } from "./evidence.ts";
-import { endpointFor, REMOTE_PROVIDERS, type Endpoint } from "./providers.ts";
+import { endpointFor, piAuthProviders, REMOTE_PROVIDERS, type Endpoint } from "./providers.ts";
 import {
+	activeTasks,
 	allowedChildLevels,
 	counts,
 	effectiveLevel,
@@ -107,9 +112,18 @@ export async function probeLatency(endpoint: Endpoint): Promise<{ ms: number; er
 	}
 }
 
-/** Queue shape problems that only show up as strange model behaviour later. */
+/**
+ * Queue shape problems that only show up as strange model behaviour later.
+ *
+ * Every check is about work still to be done, so archived tasks are not the
+ * *subject* of one — a shipped task with a long description is not a warning
+ * about dead prompt text. They stay in `store.tasks` throughout, because the
+ * tree questions each check asks (is this a leaf, who is its parent) are wrong
+ * without them.
+ */
 export function auditQueue(store: Store): Check[] {
 	const checks: Check[] = [];
+	const active = activeTasks(store);
 	const seen = new Set<string>();
 	const duplicates = new Set<string>();
 	for (const task of store.tasks) {
@@ -124,7 +138,7 @@ export function auditQueue(store: Store): Check[] {
 		});
 	}
 
-	const orphans = store.tasks.filter((task) => task.parent && !findTask(store, task.parent));
+	const orphans = active.filter((task) => task.parent && !findTask(store, task.parent));
 	if (orphans.length) {
 		checks.push({
 			level: "fail",
@@ -133,7 +147,7 @@ export function auditQueue(store: Store): Check[] {
 		});
 	}
 
-	const cyclic = store.tasks.filter((task) => {
+	const cyclic = active.filter((task) => {
 		const seenIds = new Set<string>([task.id]);
 		let parent = parentOf(task, store.tasks);
 		while (parent) {
@@ -151,7 +165,7 @@ export function auditQueue(store: Store): Check[] {
 
 	// "A task spawns code" — a task owning children is a contradiction. The CLI
 	// refuses to create one, so this catches hand-edited queues.
-	const codeParents = store.tasks.filter((task) => task.level === "task" && !isLeaf(task, store.tasks));
+	const codeParents = active.filter((task) => task.level === "task" && !isLeaf(task, store.tasks));
 	if (codeParents.length) {
 		checks.push({
 			level: "fail",
@@ -160,7 +174,7 @@ export function auditQueue(store: Store): Check[] {
 		});
 	}
 
-	const badLevels = store.tasks.filter((task) => {
+	const badLevels = active.filter((task) => {
 		const parentId = parentOf(task, store.tasks);
 		const parent = parentId ? findTask(store, parentId) : undefined;
 		return parent ? !allowedChildLevels(effectiveLevel(parent, store.tasks)).includes(levelOf(task)) : false;
@@ -173,7 +187,7 @@ export function auditQueue(store: Store): Check[] {
 		});
 	}
 
-	const pending = store.tasks.filter((task) => task.status !== "done" && needsBreakdown(task, store.tasks));
+	const pending = active.filter((task) => task.status !== "done" && needsBreakdown(task, store.tasks));
 	if (pending.length) {
 		checks.push({
 			level: "ok",
@@ -182,7 +196,7 @@ export function auditQueue(store: Store): Check[] {
 		});
 	}
 
-	const coarse = store.tasks.filter((task) => task.overflowed);
+	const coarse = active.filter((task) => task.overflowed);
 	if (coarse.length) {
 		checks.push({
 			level: "warn",
@@ -196,7 +210,7 @@ export function auditQueue(store: Store): Check[] {
 	// Still every non-leaf, level or not: a scope's detail *is* shown by the
 	// breakdown prompt, but only while it is childless — and then it is a leaf.
 	// Once it has children nothing prompts it again, so the text is dead.
-	const detailedParents = store.tasks.filter((task) => !isLeaf(task, store.tasks) && task.detail);
+	const detailedParents = active.filter((task) => !isLeaf(task, store.tasks) && task.detail);
 	if (detailedParents.length) {
 		checks.push({
 			level: "warn",
@@ -205,7 +219,7 @@ export function auditQueue(store: Store): Check[] {
 		});
 	}
 
-	const thin = store.tasks.filter(
+	const thin = active.filter(
 		(task) => isLeaf(task, store.tasks) && task.status === "todo" && task.title.length < MIN_TITLE_LENGTH,
 	);
 	if (thin.length) {
@@ -217,11 +231,15 @@ export function auditQueue(store: Store): Check[] {
 	}
 
 	const stats = counts(store);
+	const archived = store.tasks.length - active.length;
+	const activeLeaves = active.filter((task) => isLeaf(task, store.tasks)).length;
 	checks.push({
 		level: nextLeaf(store) ? "ok" : "warn",
 		label: "queue",
 		detail:
-			`${store.tasks.length} task${store.tasks.length === 1 ? "" : "s"}, ${stats.leaves} leaves, ${stats.todo} todo, ${stats.blocked} blocked` +
+			`${store.schema.name} schema, ${active.length} active task${active.length === 1 ? "" : "s"}` +
+			(archived ? `, ${archived} archived` : "") +
+			`, ${activeLeaves} leaves, ${stats.todo} todo, ${stats.blocked} blocked` +
 			(stats.pending_breakdowns ? `, ${stats.pending_breakdowns} awaiting breakdown` : "") +
 			(nextLeaf(store) ? `, next is ${nextLeaf(store)?.id}` : ", nothing runnable"),
 	});
@@ -236,57 +254,96 @@ export interface DoctorOptions {
 	probe: boolean;
 }
 
-export async function diagnose(options: DoctorOptions): Promise<Check[]> {
-	const { cwd, config, store } = options;
-	const checks: Check[] = [];
+/** What the model checks need to know about this machine, gathered once. */
+export interface ModelEnvironment {
+	/** Local ollama tags, or undefined when ollama did not answer. */
+	local?: OllamaModel[];
+	/** Total VRAM in bytes, when it could be read. */
+	vram?: number;
+	/** Providers pi holds credentials for. */
+	piProviders: string[];
+}
 
-	const models = await listOllamaModels(config.ollama.base_url);
+/**
+ * Everything doctor can say about the two models, without doing the I/O itself.
+ * Pure, so the combinations that are awkward to reproduce — hosted worker with
+ * a local verifier, both hosted, ollama down but nothing local configured — are
+ * testable without an ollama or a GPU.
+ */
+export function modelChecks(config: Config, env: ModelEnvironment): Check[] {
+	const checks: Check[] = [];
 	const findLocal = (name: string) =>
-		models?.find((entry) => entry.name === name || entry.name === `${name}:latest`);
+		env.local?.find((entry) => entry.name === name || entry.name === `${name}:latest`);
 
 	const inherited = inheritsWorker(config);
-	const workerRef = inherited ? piDefaultModel() : config.models.worker;
-	const worker = workerRef ? splitModelRef(workerRef).model : "";
-	const verifierEndpoint = endpointFor(config.models.verifier, config);
+	const workerRef = inherited ? piDefaultRef() : config.models.worker;
+	const worker = workerRef ? splitModelRef(workerRef) : undefined;
+	const workerLocal = workerRef ? isLocalRef(workerRef) : false;
+	const verifier = endpointFor(config.models.verifier, config);
+	const verifierLabel = REMOTE_PROVIDERS[verifier.provider]?.label ?? verifier.provider;
+	const origin = inherited ? ", inherited from pi settings" : "";
 
-	// The worker is always local, so ollama has to be up even when the verifier is not.
-	if (!models) {
+	// ollama only has to be up for the roles that actually run on it. Demanding it
+	// for a pair of hosted models is a failure the user cannot act on.
+	if (workerLocal || !verifier.remote) {
+		checks.push(
+			env.local
+				? { level: "ok", label: "ollama", detail: `${env.local.length} models at ${config.ollama.base_url}` }
+				: {
+						level: "fail",
+						label: "ollama",
+						detail: `no response from ${config.ollama.base_url} — start ollama or fix ollama.base_url`,
+					},
+		);
+	}
+
+	if (!worker) {
 		checks.push({
-			level: "fail",
-			label: "ollama",
-			detail: `no response from ${config.ollama.base_url} — start ollama or fix ollama.base_url`,
+			level: "warn",
+			label: "worker model",
+			detail: inherited ? "set to inherit, but pi has no defaultModel configured" : "no worker model configured",
 		});
-	} else {
-		checks.push({ level: "ok", label: "ollama", detail: `${models.length} models at ${config.ollama.base_url}` });
-
-		if (!worker) {
-			checks.push({
-				level: "warn",
-				label: "worker model",
-				detail: inherited
-					? "set to inherit, but pi has no defaultModel configured"
-					: "no worker model configured",
-			});
-		} else {
-			const found = findLocal(worker);
-			const origin = inherited ? ", inherited from pi settings" : "";
+	} else if (workerLocal) {
+		if (env.local) {
+			const found = findLocal(worker.model);
 			checks.push(
 				found
-					? { level: "ok", label: "worker model", detail: `${worker} (${gb(found.size)})${origin}` }
-					: { level: "fail", label: "worker model", detail: `${worker} is not pulled — run: ollama pull ${worker}` },
+					? { level: "ok", label: "worker model", detail: `${worker.model} (${gb(found.size)})${origin}` }
+					: {
+							level: "fail",
+							label: "worker model",
+							detail: `${worker.model} is not pulled — run: ollama pull ${worker.model}`,
+						},
 			);
 		}
 
-		if (!inherited && /:[^:]+$/.test(config.models.worker) && !findLocal(worker)) {
+		if (!inherited && /:[^:]+$/.test(worker.model) && !findLocal(worker.model)) {
 			checks.push({
 				level: "warn",
 				label: "worker model reference",
 				detail: `pi reads the ":" suffix in ${config.models.worker} as a thinking level, so --model will not resolve it; use "inherit" instead`,
 			});
 		}
+	} else {
+		// A hosted worker always runs inside pi — the driver spawns `pi -p` and the
+		// extension sets the session model — so pi's own credentials are the ones
+		// that have to be there. This driver never calls the worker's endpoint.
+		checks.push(
+			env.piProviders.includes(worker.provider)
+				? {
+						level: "ok",
+						label: "worker model",
+						detail: `${worker.model} via ${worker.provider} — hosted, so nothing to pull and no VRAM to share${origin}`,
+					}
+				: {
+						level: "fail",
+						label: "worker model",
+						detail: `pi has no credentials for ${worker.provider} — run /login in pi, or point models.worker at an ollama model`,
+					},
+		);
 	}
 
-	if (worker && !verifierEndpoint.remote && worker === verifierEndpoint.model) {
+	if (worker && worker.provider === verifier.provider && worker.model === verifier.model) {
 		checks.push({
 			level: "warn",
 			label: "verifier independence",
@@ -294,49 +351,44 @@ export async function diagnose(options: DoctorOptions): Promise<Check[]> {
 		});
 	}
 
-	if (verifierEndpoint.remote) {
-		const label = REMOTE_PROVIDERS[verifierEndpoint.provider]?.label ?? verifierEndpoint.provider;
+	if (verifier.remote) {
 		checks.push(
-			verifierEndpoint.problem
-				? { level: "fail", label: "verifier model", detail: verifierEndpoint.problem }
+			verifier.problem
+				? { level: "fail", label: "verifier model", detail: verifier.problem }
 				: {
 						level: "ok",
 						label: "verifier model",
-						detail: `${verifierEndpoint.model} via ${label} — hosted, so it never competes with the worker for VRAM`,
+						detail: `${verifier.model} via ${verifierLabel} — hosted, so it never competes with the worker for VRAM`,
 					},
 		);
-		checks.push({
-			level: "warn",
-			label: "evidence leaves this machine",
-			detail:
-				`the task text, changed file list and diff go to ${label} on every verification, and the call is metered. ` +
-				"Set models.verifier to an ollama model to keep everything local.",
-		});
-	} else if (models) {
-		const verifier = verifierEndpoint.model;
-		const verifierEntry = findLocal(verifier);
+	} else if (env.local) {
+		const verifierEntry = findLocal(verifier.model);
 		checks.push(
 			verifierEntry
-				? { level: "ok", label: "verifier model", detail: `${verifier} (${gb(verifierEntry.size)})` }
-				: { level: "fail", label: "verifier model", detail: `${verifier} is not pulled — run: ollama pull ${verifier}` },
+				? { level: "ok", label: "verifier model", detail: `${verifier.model} (${gb(verifierEntry.size)})` }
+				: {
+						level: "fail",
+						label: "verifier model",
+						detail: `${verifier.model} is not pulled — run: ollama pull ${verifier.model}`,
+					},
 		);
 
-		const workerEntry = findLocal(worker);
-		const vram = await totalVramBytes();
-		if (workerEntry && verifierEntry && vram) {
+		// Contention is only possible when both models want the same card.
+		const workerEntry = workerLocal && worker ? findLocal(worker.model) : undefined;
+		if (workerEntry && verifierEntry && env.vram) {
 			const combined = workerEntry.size + verifierEntry.size;
 			checks.push(
-				combined < vram * 0.92
+				combined < env.vram * 0.92
 					? {
 							level: "ok",
 							label: "vram",
-							detail: `${gb(combined)} of ${gb(vram)} — worker and verifier can stay resident together`,
+							detail: `${gb(combined)} of ${gb(env.vram)} — worker and verifier can stay resident together`,
 						}
 					: {
 							level: "warn",
 							label: "vram",
 							detail:
-								`${gb(combined)} needed but only ${gb(vram)} available — every verification evicts the worker, ` +
+								`${gb(combined)} needed but only ${gb(env.vram)} available — every verification evicts the worker, ` +
 								"so expect two model loads per task. Either accept the cost, pick a verifier small enough to co-reside, " +
 								"drop the worker to a smaller context variant to free KV cache, or move the verifier off the box " +
 								'(models.verifier = "opencode/qwen3.6-plus").',
@@ -344,6 +396,40 @@ export async function diagnose(options: DoctorOptions): Promise<Check[]> {
 			);
 		}
 	}
+
+	// One disclosure rather than one per role: what matters is which of your code
+	// leaves the machine, and that reads badly split across two near-identical
+	// warnings when both models are hosted.
+	const leaving: string[] = [];
+	if (worker && !workerLocal) leaving.push(`the worker's prompts and the files it reads go to ${worker.provider}`);
+	if (verifier.remote) {
+		leaving.push(`the task text, changed file list and diff go to ${verifierLabel} on every verification`);
+	}
+	if (leaving.length) {
+		checks.push({
+			level: "warn",
+			label: "work leaves this machine",
+			detail: `${leaving.join("; ")}, and the calls are metered. Point ${
+				leaving.length > 1 ? "models.worker and models.verifier" : "it"
+			} at ollama models to keep everything local.`,
+		});
+	}
+
+	return checks;
+}
+
+export async function diagnose(options: DoctorOptions): Promise<Check[]> {
+	const { cwd, config, store } = options;
+	const checks: Check[] = [];
+
+	const verifierEndpoint = endpointFor(config.models.verifier, config);
+	checks.push(
+		...modelChecks(config, {
+			local: await listOllamaModels(config.ollama.base_url),
+			vram: await totalVramBytes(),
+			piProviders: piAuthProviders(),
+		}),
+	);
 
 	if (await isGitRepo(cwd)) {
 		const clean = await isTreeClean(cwd);
