@@ -28,13 +28,63 @@ todo doctor                                  # check models, VRAM, git and queue
 Dev dependencies (`npm install`) are only needed to run `npx tsc` and are not
 required to use the loop.
 
+**If your project already keeps a backlog, skip `init` for the queue** — point
+the loop at the real one instead. See
+[Working an existing queue](#working-an-existing-queue).
+
+## Working an existing queue
+
+The loop is only worth running on the backlog you actually keep, so it reads
+whichever of two schemas it finds rather than insisting on its own. With no
+`--file`, an existing `TODO.toml` or `todo.toml` in the working directory is
+adopted; `todo status` names the file, the schema and the state file it settled
+on, so a queue is never silently the wrong one.
+
+|                        | native                     | project                                        |
+|------------------------|----------------------------|------------------------------------------------|
+| prose field            | `detail`                   | `description`                                  |
+| statuses               | `todo doing done blocked`  | `active in-progress blocked`, `finished`       |
+| priority               | position in the file       | `urgency`, then `order`                        |
+| finished work          | stays, marked `done`       | moves to the archive named in `[meta]`         |
+| the loop's bookkeeping | on the task                | a sidecar beside the queue                     |
+
+The project schema is recognised by its own markers — a `schema_version`, a
+`[meta]` table, or a task carrying `description`/`urgency`/`order`/`category`.
+
+Three rules govern every write to a queue in that shape, because the project's
+own CLI owns the file and the two have to be able to hand it back and forth:
+
+1. **Nothing is dropped.** Every field the loop has no opinion about — category,
+   tags, created, your own per-task flags — is carried through verbatim, in its
+   original position, and `created = 2026-09-12` stays a date rather than
+   becoming a string in quotes. A full load and save of a queue and its archive
+   is byte-for-byte identical.
+2. **Nothing foreign is added.** Attempt counts, timings, verdicts and loop
+   state go to `<queue>.todoloop-state.toml` beside the queue. A project CLI
+   that rewrites its file from a fixed field list would drop them, so they never
+   go in it; claiming a task changes exactly one line of your queue, from
+   `active` to `in-progress`. Delete the state file to forget every attempt
+   count — nothing about the work itself is in there. Gitignore it if you would
+   rather it did not travel with the repo.
+3. **New rows look like old ones.** A task the loop adds during a breakdown gets
+   the same metadata every other row carries, including an `order` ten past the
+   highest in use.
+
+The archive is read as well as written. A scope that was broken down and has
+since shipped its children would otherwise look untouched, and the loop would
+break it down a second time into duplicate children.
+
+`todo status` hides archived work; `todo status --all` includes it.
+
 ## Check the setup first
 
 `todo doctor` answers the questions that are cheaper to ask now than to discover
-halfway through an overnight run: is Ollama up, is the worker pulled, can the
-verifier actually be reached with the credentials on this machine, is this a git
-repository, and does the queue have a runnable leaf. Add `--probe` to measure a
-real verifier round trip.
+halfway through an overnight run: is each model reachable — pulled, if it runs on
+Ollama, or backed by credentials pi holds, if it is hosted — is this a git
+repository, and does the queue have a runnable leaf. Checks that only apply to a
+local model are skipped for a hosted one, so a fully hosted pair does not report
+a missing Ollama it never wanted. Add `--probe` to measure a real verifier round
+trip.
 
 ## Where the verifier runs
 
@@ -191,6 +241,11 @@ Order is priority order — the loop always takes the **first incomplete leaf**.
 Parents are never handed to the model as work; a parent's work is its children,
 and a parent rolls up to `done` on its own once every child is done.
 
+(A queue in the [project schema](#working-an-existing-queue) states its priority
+in fields instead, and states it flat, so the tree is rebuilt and walked
+depth-first with siblings ranked by `urgency` then `order` — same rule, read from
+a different place. Everything below applies to both.)
+
 Hierarchy comes from an explicit `parent`, or from dotted ids when `parent` is
 absent (`api.route` is a child of `api`). Both work, and they mix; the explicit
 field wins. Use it when your ids are not hierarchical:
@@ -293,11 +348,19 @@ failure — oversized work that verified fine is left alone and merely flagged.
 See `templates/todoloop.toml` for every option with its default. The ones that
 matter most:
 
-- `models.worker` — defaults to `inherit`, meaning the shell driver uses whatever
-  model pi is already configured with. Prefer that: pi's `--model` flag reads a
-  trailing `:suffix` as a thinking level, so an Ollama tag like
-  `qwen3.8-27b:52k` cannot be passed through the flag at all. The in-session
-  extension always uses the active session model and ignores this setting.
+- `models.worker` — the shell driver's model, as `provider/model`. Defaults to
+  `openai-codex/gpt-5.6-terra`, which needs a ChatGPT Plus or Pro subscription
+  logged in through pi's `/login`; `todo doctor` fails loudly if pi holds no
+  credentials for the provider. `todo --provider <name>` and `todo --model <id>`
+  override it for a single run — either alone is enough, and a `--model` that
+  carries its own `provider/` prefix decides both halves. Set it to `inherit` to
+  use whatever pi is already configured with, which is the right answer for a
+  local worker: pi's `--model` flag reads a trailing `:suffix` as a thinking
+  level, so an Ollama tag like `qwen3.8-27b:52k` cannot be passed through the
+  flag at all. The in-session extension still uses the active session model —
+  it cannot set the model on a session it is in the middle of replacing — but
+  `/todo-run` now says so when the two disagree, rather than running the queue
+  on a model the config claims it is not using.
 - `models.verifier` — keep it different from the worker. A model judging its own
   output is the weakest version of this check, and the verify call is short
   enough that a small model is fine. Defaults to `opencode/qwen3.6-plus`; see
@@ -326,11 +389,12 @@ matter most:
 ```
 todo init                      Write todoloop.toml and todo.toml starters
 todo doctor [--probe]          Check models, VRAM, git and queue shape
-todo status                    Show the queue
+todo status [--all]            Show the queue (--all includes archived work)
 todo stop                      Stop a running loop after the current task
 todo next [--id]               Print the next task's prompt (exit 3 when empty)
 todo start                     Claim the next task and print its prompt
-todo add <id> <title...>       Append a task (--detail "...", --parent <id>)
+todo add <id> <title...>       Append a task (--detail "...", --parent <id>, --level task|scope|epic,
+                               --category <c>, --urgency <u> where the schema has them)
 todo done <id> [summary...]    Mark done without verifying
 todo block <id> <reason...>    Mark blocked
 todo reset <id>                Return a task to todo and clear attempts
@@ -338,7 +402,14 @@ todo verify [id]               Gather evidence and print the verdict as JSON
 todo complete <id> [summary]   Verify, then mark done or record the failure
 todo checkpoint [message...]   Commit everything in the working tree
 todo run [--max N] [--dry-run] Drive the queue with one pi process per task
+
+Shared flags: --cwd <dir> --file <todo.toml> --config <todoloop.toml>
+              --provider <name> --model <id>   override the configured worker
 ```
+
+With no `--file`, an existing `TODO.toml` or `todo.toml` in `--cwd` is adopted
+and its schema read from the file — see
+[Working an existing queue](#working-an-existing-queue).
 
 Exit codes: `0` success, `1` error or halt, `3` queue empty, `4` verification
 rejected.
@@ -346,7 +417,7 @@ rejected.
 ## Tests
 
 ```bash
-node --test test/      # 135 tests, no model required
+node --test test/      # 150 tests, no model required
 npx tsc                # type-checks src, extension and tests
 ```
 
