@@ -1,16 +1,42 @@
 /**
- * todo.toml: the queue that outlives any single session.
+ * The queue that outlives any single session.
  *
  * Session-embedded state (the shape Pi's own todo example uses) is the right
  * default for branchable todos, but this loop replaces the session on every
  * task, so the queue has to live on disk.
+ *
+ * It does not have to live in a file of *our* design, though, and mostly it
+ * should not: a project that already keeps a backlog wants the loop to work
+ * that backlog rather than a copy of it. So this module reads whichever of the
+ * two schemas it finds (src/schema.ts), keeps everything it does not understand
+ * verbatim, and writes the file back in the shape it arrived in. A queue can be
+ * handed back and forth between todo-loop and the project's own CLI without
+ * either one losing the other's fields.
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { parseToml, stringifyToml, type TomlTable } from "./toml.ts";
+import { isRaw, isTable, leadingComments, parseToml, stringifyToml, todayRaw, type TomlTable } from "./toml.ts";
+import {
+	detectSchema,
+	NATIVE_SCHEMA,
+	urgencyRank,
+	type Schema,
+	type TaskStatus,
+} from "./schema.ts";
+import {
+	emptyLoopState,
+	emptySidecar,
+	loadSidecar,
+	saveSidecar,
+	sidecarPathFor,
+	type LoopState,
+	type Sidecar,
+	type TaskState,
+} from "./sidecar.ts";
 
-export type TaskStatus = "todo" | "doing" | "done" | "blocked";
+export type { TaskStatus } from "./schema.ts";
+export type { LoopState } from "./sidecar.ts";
 
 /**
  * How big an item is, and therefore what "working" it means.
@@ -45,39 +71,65 @@ export interface Task {
 	overflowed?: boolean;
 	/** Why `overflowed` was set — shown in status and doctor. */
 	overflow_reason?: string;
-}
-
-export interface LoopState {
-	running: boolean;
-	current: string;
-	iterations: number;
-	base_commit: string;
-	last_failure: string;
+	/**
+	 * Every field on the task that this loop has no opinion about — category,
+	 * tags, created, a project's own per-task flags — kept verbatim so a write
+	 * cannot drop them. Deliberately holds *only* the unmodelled fields: a second
+	 * copy of `status` here would go stale the moment the task moved.
+	 */
+	extra?: TomlTable;
+	/**
+	 * True when this task lives in the archive file rather than the active one.
+	 * Not a field on disk: it is which file the task is written back to.
+	 */
+	archived?: boolean;
 }
 
 export interface Store {
+	/** Which on-disk shape this queue is written in. Every write goes back out in it. */
+	schema: Schema;
+	/** Everything in the active file that is not a task, in its original order. */
+	doc: TomlTable;
+	/** The active file's own leading comment block, preserved across writes. */
+	header: string;
 	loop: LoopState;
+	/** Active and archived tasks together; `archived` says which file each came from. */
 	tasks: Task[];
+	/** The second file, when the schema archives finished work rather than marking it in place. */
+	archive?: { doc: TomlTable; header: string; file: string };
+	/** Where the loop's own bookkeeping lives, when it may not live on the tasks. */
+	sidecarFile?: string;
 }
 
 export const DEFAULT_STORE_FILE = "todo.toml";
 
-const STATUSES: TaskStatus[] = ["todo", "done", "doing", "blocked"];
+/** Task files the loop will adopt without being told, most specific first. */
+export const STORE_CANDIDATES = ["TODO.toml", "todo.toml"];
+
 const LEVELS: TaskLevel[] = ["task", "scope", "epic"];
+
+/** Keys the loop owns. Under a schema with a sidecar, none of them may touch the task file. */
+const BOOKKEEPING = ["attempts", "started_at", "done_at", "summary", "reason", "overflowed", "overflow_reason"];
+
+/** Keys `Task` models directly, and which therefore never belong in `extra`. */
+const MODELLED = ["id", "title", "status", "level", "parent", ...BOOKKEEPING];
+
+/** Dropped when a task is archived — they rank active work and mean nothing once it has shipped. */
+const RANKING_KEYS = ["order", "urgency"];
+
+const NATIVE_HEADER =
+	"# Managed by todo-loop. Order is priority order; the loop always takes\n" +
+	"# the first incomplete leaf. Dotted ids imply hierarchy (a.b is under a).";
 
 function asString(value: unknown, fallback = ""): string {
 	if (typeof value === "string") return value;
+	if (isRaw(value)) return value.token;
 	if (typeof value === "number" || typeof value === "boolean") return String(value);
 	return fallback;
 }
 
 function asNumber(value: unknown, fallback = 0): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-}
-
-function asStatus(value: unknown): TaskStatus {
-	const raw = asString(value, "todo");
-	return STATUSES.includes(raw as TaskStatus) ? (raw as TaskStatus) : "todo";
 }
 
 function asLevel(value: unknown): TaskLevel {
@@ -130,106 +182,305 @@ export function allowedChildLevels(level: TaskLevel): TaskLevel[] {
 	return [];
 }
 
+/**
+ * Which file to work on.
+ *
+ * An explicit path always wins. With none given, an existing queue is adopted
+ * rather than a second one created beside it — the common mistake otherwise is
+ * a project with a `TODO.toml` quietly getting an empty `todo.toml` on the
+ * first write, and a loop that reports the queue is empty while the real one
+ * sits next to it.
+ */
 export function resolveStorePath(cwd: string, file?: string): string {
-	const target = file ?? process.env.TODOLOOP_FILE ?? DEFAULT_STORE_FILE;
-	return path.isAbsolute(target) ? target : path.join(cwd, target);
+	const target = file ?? process.env.TODOLOOP_FILE;
+	if (target) return path.isAbsolute(target) ? target : path.join(cwd, target);
+	for (const candidate of STORE_CANDIDATES) {
+		const full = path.join(cwd, candidate);
+		if (fs.existsSync(full)) return full;
+	}
+	return path.join(cwd, DEFAULT_STORE_FILE);
 }
 
 export function emptyStore(): Store {
 	return {
-		loop: { running: false, current: "", iterations: 0, base_commit: "", last_failure: "" },
+		schema: NATIVE_SCHEMA,
+		doc: {},
+		header: NATIVE_HEADER,
+		loop: emptyLoopState(),
 		tasks: [],
 	};
 }
 
-export function parseStore(text: string): Store {
-	const doc = parseToml(text);
-	const loopTable = (doc.loop ?? {}) as Record<string, unknown>;
-	const rawTasks = Array.isArray(doc.task) ? (doc.task as Record<string, unknown>[]) : [];
+/** The document minus its tasks, which are modelled rather than passed through. */
+function preamble(doc: TomlTable): TomlTable {
+	const out: TomlTable = {};
+	for (const [key, value] of Object.entries(doc)) {
+		if (key === "task") continue;
+		out[key] = value;
+	}
+	return out;
+}
 
-	const tasks: Task[] = [];
-	for (const raw of rawTasks) {
-		const id = asString(raw.id).trim();
-		if (!id) continue;
-		const task: Task = {
-			id,
-			title: asString(raw.title, id),
-			status: asStatus(raw.status),
-			attempts: asNumber(raw.attempts),
-		};
-		const detail = asString(raw.detail);
-		if (detail) task.detail = detail;
-		const parent = asString(raw.parent);
-		if (parent) task.parent = parent;
-		if (raw.level !== undefined) task.level = asLevel(raw.level);
-		if (raw.overflowed === true) task.overflowed = true;
-		const overflowReason = asString(raw.overflow_reason);
-		if (overflowReason) task.overflow_reason = overflowReason;
-		const summary = asString(raw.summary);
-		if (summary) task.summary = summary;
-		const reason = asString(raw.reason);
-		if (reason) task.reason = reason;
-		const startedAt = asString(raw.started_at);
-		if (startedAt) task.started_at = startedAt;
-		const doneAt = asString(raw.done_at);
-		if (doneAt) task.done_at = doneAt;
-		tasks.push(task);
+function readTask(raw: TomlTable, schema: Schema, archived: boolean): Task | undefined {
+	const id = asString(raw.id).trim();
+	if (!id) return undefined;
+
+	const status = schema.statusIn[asString(raw.status, "todo")] ?? (archived ? "done" : "todo");
+	const extra: TomlTable = {};
+	for (const [key, value] of Object.entries(raw)) {
+		if (key === schema.detailKey || MODELLED.includes(key)) continue;
+		extra[key] = value;
 	}
 
-	return {
-		loop: {
+	const task: Task = {
+		id,
+		title: asString(raw.title, id),
+		status: archived ? "done" : status,
+		attempts: asNumber(raw.attempts),
+		extra,
+	};
+	if (archived) task.archived = true;
+
+	const detail = asString(raw[schema.detailKey]);
+	if (detail) task.detail = detail;
+	const parent = asString(raw.parent);
+	if (parent) task.parent = parent;
+	if (raw.level !== undefined) task.level = asLevel(raw.level);
+	if (raw.overflowed === true) task.overflowed = true;
+	const overflowReason = asString(raw.overflow_reason);
+	if (overflowReason) task.overflow_reason = overflowReason;
+	const summary = asString(raw.summary);
+	if (summary) task.summary = summary;
+	const reason = asString(raw.reason);
+	if (reason) task.reason = reason;
+	const startedAt = asString(raw.started_at);
+	if (startedAt) task.started_at = startedAt;
+	const doneAt = asString(raw.done_at);
+	if (doneAt) task.done_at = doneAt;
+	return task;
+}
+
+function tasksIn(doc: TomlTable, schema: Schema, archived: boolean): Task[] {
+	const rows = Array.isArray(doc.task) ? (doc.task as TomlTable[]) : [];
+	const out: Task[] = [];
+	for (const row of rows) {
+		const task = readTask(row, schema, archived);
+		if (task) out.push(task);
+	}
+	return out;
+}
+
+/** Overlay the sidecar's per-task bookkeeping onto the tasks it names. */
+function applySidecar(tasks: Task[], sidecar: Sidecar): void {
+	for (const task of tasks) {
+		const state = sidecar.tasks.get(task.id);
+		if (!state) continue;
+		task.attempts = state.attempts;
+		if (state.started_at) task.started_at = state.started_at;
+		if (state.done_at) task.done_at = state.done_at;
+		if (state.summary) task.summary = state.summary;
+		if (state.reason) task.reason = state.reason;
+		if (state.overflowed) task.overflowed = true;
+		if (state.overflow_reason) task.overflow_reason = state.overflow_reason;
+	}
+}
+
+export interface ParseOptions {
+	/** Contents of the archive file, when the schema keeps finished work in one. */
+	archiveText?: string;
+	archiveFile?: string;
+	sidecar?: Sidecar;
+	sidecarFile?: string;
+	/** Overrides detection. Only for a caller that genuinely knows better. */
+	schema?: Schema;
+}
+
+export function parseStore(text: string, options: ParseOptions = {}): Store {
+	const doc = parseToml(text);
+	const schema = options.schema ?? detectSchema(doc);
+	const tasks = tasksIn(doc, schema, false);
+
+	const store: Store = {
+		schema,
+		doc: preamble(doc),
+		header: leadingComments(text) || (schema === NATIVE_SCHEMA ? NATIVE_HEADER : ""),
+		loop: emptyLoopState(),
+		tasks,
+	};
+
+	if (schema.archives && options.archiveText !== undefined) {
+		const archiveDoc = parseToml(options.archiveText);
+		store.archive = {
+			doc: preamble(archiveDoc),
+			header: leadingComments(options.archiveText),
+			file: options.archiveFile ?? "",
+		};
+		// Archived tasks join the same array. They are `done`, so selection skips
+		// them, but every question about the *tree* — has this scope been broken
+		// down, is this parent finished — is wrong without them.
+		store.tasks.push(...tasksIn(archiveDoc, schema, true));
+	}
+
+	if (schema.sidecar) {
+		store.sidecarFile = options.sidecarFile;
+		const sidecar = options.sidecar ?? emptySidecar();
+		store.loop = sidecar.loop;
+		applySidecar(store.tasks, sidecar);
+	} else {
+		const loopTable = isTable(doc.loop) ? (doc.loop as Record<string, unknown>) : {};
+		store.loop = {
 			running: loopTable.running === true,
 			current: asString(loopTable.current),
 			iterations: asNumber(loopTable.iterations),
 			base_commit: asString(loopTable.base_commit),
 			last_failure: asString(loopTable.last_failure),
-		},
-		tasks,
-	};
+		};
+		delete store.doc.loop;
+	}
+
+	return store;
 }
 
+function setOrDelete(table: TomlTable, key: string, value: string | number | boolean | undefined): void {
+	if (value === undefined || value === "") delete table[key];
+	else table[key] = value;
+}
+
+/**
+ * Lay a task's fields out in the file's own order.
+ *
+ * Known fields first, in the order that schema writes them, so a row the loop
+ * added is indistinguishable from one the project's CLI added. Anything else —
+ * a project's per-task flags, a field added since — keeps its relative position
+ * at the end rather than being dropped, which is the whole point.
+ */
+function ordered(values: TomlTable, order: string[]): TomlTable {
+	const out: TomlTable = {};
+	for (const key of order) if (values[key] !== undefined) out[key] = values[key];
+	for (const [key, value] of Object.entries(values)) {
+		if (out[key] === undefined && value !== undefined) out[key] = value;
+	}
+	return out;
+}
+
+function taskTable(task: Task, schema: Schema): TomlTable {
+	const values: TomlTable = { ...(task.extra ?? {}) };
+	values.id = task.id;
+	values.title = task.title;
+	values.status = schema.statusOut[task.status];
+	setOrDelete(values, schema.detailKey, task.detail);
+	setOrDelete(values, "parent", task.parent);
+
+	// The project schema states the level on every task; the native one leaves
+	// the default unwritten. Either way an explicit level is never dropped.
+	if (schema.name === "project") values.level = levelOf(task);
+	else setOrDelete(values, "level", task.level && task.level !== "task" ? task.level : undefined);
+
+	if (schema.sidecar) {
+		for (const key of BOOKKEEPING) delete values[key];
+	} else {
+		values.attempts = task.attempts;
+		setOrDelete(values, "started_at", task.started_at);
+		setOrDelete(values, "done_at", task.done_at);
+		setOrDelete(values, "summary", task.summary);
+		setOrDelete(values, "reason", task.reason);
+		setOrDelete(values, "overflowed", task.overflowed ? true : undefined);
+		setOrDelete(values, "overflow_reason", task.overflow_reason);
+	}
+
+	return ordered(values, schema.fieldOrder);
+}
+
+function render(header: string, doc: TomlTable, tasks: Task[], schema: Schema): string {
+	const body: TomlTable = { ...doc, task: tasks.map((task) => taskTable(task, schema)) };
+	const text = stringifyToml(body);
+	return header ? `${header.replace(/\n+$/, "")}\n\n${text}` : text;
+}
+
+/** The active file: the preamble it came with, then every task not yet archived. */
 export function serializeStore(store: Store): string {
-	const doc: TomlTable = {
-		loop: {
-			running: store.loop.running,
-			current: store.loop.current,
-			iterations: store.loop.iterations,
-			base_commit: store.loop.base_commit,
-			last_failure: store.loop.last_failure,
-		},
-		task: store.tasks.map((task) => {
-			const out: TomlTable = { id: task.id, title: task.title };
-			if (task.parent) out.parent = task.parent;
-			if (task.level && task.level !== "task") out.level = task.level;
-			out.status = task.status;
-			out.attempts = task.attempts;
-			if (task.detail) out.detail = task.detail;
-			if (task.started_at) out.started_at = task.started_at;
-			if (task.done_at) out.done_at = task.done_at;
-			if (task.summary) out.summary = task.summary;
-			if (task.reason) out.reason = task.reason;
-			if (task.overflowed) out.overflowed = true;
-			if (task.overflow_reason) out.overflow_reason = task.overflow_reason;
-			return out;
-		}),
-	};
-
-	const header =
-		"# Managed by todo-loop. Order is priority order; the loop always takes\n" +
-		"# the first incomplete leaf. Dotted ids imply hierarchy (a.b is under a).\n\n";
-	return header + stringifyToml(doc);
+	const doc: TomlTable = { ...store.doc };
+	if (!store.schema.sidecar) doc.loop = { ...store.loop };
+	return render(store.header, doc, store.tasks.filter((task) => !task.archived), store.schema);
 }
 
-export function loadStore(file: string): Store {
+/** The archive file, or undefined when this schema keeps finished work in place. */
+export function serializeArchive(store: Store): string | undefined {
+	if (!store.archive) return undefined;
+	return render(
+		store.archive.header,
+		store.archive.doc,
+		store.tasks.filter((task) => task.archived),
+		store.schema,
+	);
+}
+
+export function sidecarOf(store: Store): Sidecar {
+	const sidecar = emptySidecar();
+	sidecar.loop = { ...store.loop };
+	for (const task of store.tasks) {
+		const state: TaskState = { attempts: task.attempts };
+		if (task.started_at) state.started_at = task.started_at;
+		if (task.done_at) state.done_at = task.done_at;
+		if (task.summary) state.summary = task.summary;
+		if (task.reason) state.reason = task.reason;
+		if (task.overflowed) state.overflowed = true;
+		if (task.overflow_reason) state.overflow_reason = task.overflow_reason;
+		sidecar.tasks.set(task.id, state);
+	}
+	return sidecar;
+}
+
+/**
+ * The archive file named by the queue itself.
+ *
+ * The project schema records it in the header — `archive = "FINISHED.toml"` —
+ * which is exactly the right place for it: the queue knows where its own
+ * finished work goes, and nobody has to configure the answer twice.
+ */
+export function archivePathFor(storeFile: string, doc: TomlTable, override?: string): string {
+	const named = isTable(doc.meta) ? asString((doc.meta as TomlTable).archive) : "";
+	const target = override || named || "FINISHED.toml";
+	return path.isAbsolute(target) ? target : path.join(path.dirname(storeFile), target);
+}
+
+export interface LoadOptions {
+	/** Overrides the archive path the queue names for itself. */
+	archiveFile?: string;
+}
+
+export function loadStore(file: string, options: LoadOptions = {}): Store {
 	if (!fs.existsSync(file)) return emptyStore();
-	return parseStore(fs.readFileSync(file, "utf8"));
+	const text = fs.readFileSync(file, "utf8");
+	const doc = parseToml(text);
+	const schema = detectSchema(doc);
+
+	const parseOptions: ParseOptions = { schema };
+	if (schema.archives) {
+		const archiveFile = archivePathFor(file, doc, options.archiveFile);
+		parseOptions.archiveFile = archiveFile;
+		parseOptions.archiveText = fs.existsSync(archiveFile) ? fs.readFileSync(archiveFile, "utf8") : "";
+	}
+	if (schema.sidecar) {
+		const sidecarFile = sidecarPathFor(file);
+		parseOptions.sidecarFile = sidecarFile;
+		parseOptions.sidecar = loadSidecar(sidecarFile);
+	}
+	return parseStore(text, parseOptions);
+}
+
+function writeAtomic(file: string, contents: string): void {
+	const tmp = `${file}.tmp-${process.pid}`;
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(tmp, contents);
+	fs.renameSync(tmp, file);
 }
 
 export function saveStore(file: string, store: Store): void {
-	const tmp = `${file}.tmp-${process.pid}`;
-	fs.mkdirSync(path.dirname(file), { recursive: true });
-	fs.writeFileSync(tmp, serializeStore(store));
-	fs.renameSync(tmp, file);
+	writeAtomic(file, serializeStore(store));
+	const archive = serializeArchive(store);
+	if (archive !== undefined && store.archive?.file) writeAtomic(store.archive.file, archive);
+	if (store.schema.sidecar && store.sidecarFile) saveSidecar(store.sidecarFile, sidecarOf(store));
 }
 
 /** Explicit `parent`, else the dotted-id prefix when a task with that id exists. */
@@ -253,13 +504,79 @@ export function findTask(store: Store, id: string): Task | undefined {
 	return store.tasks.find((task) => task.id === id);
 }
 
+/** Tasks still in the active file — what "the queue" means to anyone reading it. */
+export function activeTasks(store: Store): Task[] {
+	return store.tasks.filter((task) => !task.archived);
+}
+
+/**
+ * Priority order, most urgent first.
+ *
+ * Mirrors the project CLI exactly — urgency descending, then `order` ascending,
+ * then id — because the two tools have to agree about what is next or the
+ * ranking in the file is a lie. A task with no `order` sorts after every task
+ * that has one, which is what an unranked addition should do.
+ */
+function rankOf(task: Task): [number, number, string] {
+	const extra = task.extra ?? {};
+	const order = typeof extra.order === "number" ? extra.order : Number.POSITIVE_INFINITY;
+	return [-urgencyRank(extra.urgency), order, task.id];
+}
+
+function byRank(a: Task, b: Task): number {
+	const [au, ao, ai] = rankOf(a);
+	const [bu, bo, bi] = rankOf(b);
+	return au - bu || ao - bo || ai.localeCompare(bi);
+}
+
+/**
+ * Every task in the order the loop should work them.
+ *
+ * A ranked schema states its priority in fields, and states it *flat* — parents
+ * and children sit wherever they were appended — so the tree has to be rebuilt
+ * and walked depth-first, ranking siblings at each level. Finishing one scope
+ * beats starting nine.
+ *
+ * An unranked schema already keeps the array in priority order and inserts
+ * children beside their parents, so the array *is* the answer and is returned
+ * untouched. Reordering it would silently change which task a long-standing
+ * queue hands out next.
+ */
+export function workingOrder(store: Store): Task[] {
+	if (!store.schema.ranked) return store.tasks;
+
+	const byParent = new Map<string, Task[]>();
+	for (const task of store.tasks) {
+		const key = parentOf(task, store.tasks) ?? "";
+		const siblings = byParent.get(key);
+		if (siblings) siblings.push(task);
+		else byParent.set(key, [task]);
+	}
+
+	const out: Task[] = [];
+	const seen = new Set<string>();
+	const walk = (parent: string): void => {
+		for (const task of (byParent.get(parent) ?? []).slice().sort(byRank)) {
+			if (seen.has(task.id)) continue;
+			seen.add(task.id);
+			out.push(task);
+			walk(task.id);
+		}
+	};
+	walk("");
+	// A task whose parent is missing, or part of a cycle, is still work. Append it
+	// rather than letting it vanish from the queue.
+	for (const task of store.tasks) if (!seen.has(task.id)) out.push(task);
+	return out;
+}
+
 /**
  * Leftmost incomplete leaf. Interior nodes are never handed to the model —
  * a parent's work is its children, and prompting with one is how a bounded
  * task turns into a forty-turn run.
  */
 export function nextLeaf(store: Store): Task | undefined {
-	return store.tasks.find(
+	return workingOrder(store).find(
 		(task) => (task.status === "todo" || task.status === "doing") && isLeaf(task, store.tasks),
 	);
 }
@@ -290,9 +607,11 @@ export function descendantsOf(id: string, tasks: Task[]): Task[] {
  * Insert children directly after their parent's block rather than at the end of
  * the queue.
  *
- * Order is priority order and `nextLeaf` reads it literally, so appending would
- * push freshly-scoped work behind every unrelated epic — breadth-first sprawl
- * instead of finishing one thing. Inserting in place keeps the loop depth-first.
+ * Order is priority order under the native schema and `nextLeaf` reads it
+ * literally, so appending would push freshly-scoped work behind every unrelated
+ * epic — breadth-first sprawl instead of finishing one thing. Inserting in place
+ * keeps the loop depth-first. Under a ranked schema position is only cosmetic,
+ * but a child beside its parent still reads better in a diff.
  */
 export function insertChildren(store: Store, parentId: string, children: Task[]): void {
 	if (!children.length) return;
@@ -301,7 +620,7 @@ export function insertChildren(store: Store, parentId: string, children: Task[])
 		store.tasks.push(...children);
 		return;
 	}
-	const block = descendantsOf(parentId, store.tasks);
+	const block = descendantsOf(parentId, store.tasks).filter((task) => !task.archived);
 	const last = block.length ? block[block.length - 1] : parent;
 	const at = store.tasks.indexOf(last) + 1;
 	store.tasks.splice(at, 0, ...children);
@@ -311,13 +630,13 @@ export function insertChildren(store: Store, parentId: string, children: Task[])
 export function rollup(store: Store): void {
 	for (let pass = 0; pass < 8; pass++) {
 		let changed = false;
-		for (const task of store.tasks) {
+		// Snapshot: archiving a parent moves it within the array, and mutating the
+		// list being iterated skips its neighbour.
+		for (const task of [...store.tasks]) {
 			const kids = childrenOf(task.id, store.tasks);
 			if (kids.length === 0) continue;
 			if (kids.every((kid) => kid.status === "done") && task.status !== "done") {
-				task.status = "done";
-				task.done_at = task.done_at ?? new Date().toISOString();
-				task.summary = task.summary ?? `All ${kids.length} subtasks complete.`;
+				markDone(store, task, task.summary ?? `All ${kids.length} subtasks complete.`, false);
 				changed = true;
 			} else if (kids.some((kid) => kid.status === "blocked") && task.status === "done") {
 				task.status = "todo";
@@ -350,13 +669,36 @@ export function markDoing(store: Store, task: Task, baseCommit: string): void {
 	if (task.attempts === 0) store.loop.last_failure = "";
 }
 
-export function markDone(store: Store, task: Task, summary: string): void {
+/**
+ * Move a finished task into the archive file.
+ *
+ * Follows the project CLI to the letter, because the two write the same file:
+ * stamped `completed`, inserted newest-first, and stripped of the fields that
+ * only rank *active* work. `parent` survives — what a scope actually delivered
+ * is the question the archive exists to answer.
+ */
+function archiveTask(store: Store, task: Task): void {
+	if (!store.archive || task.archived) return;
+	const extra: TomlTable = { ...(task.extra ?? {}) };
+	for (const key of RANKING_KEYS) delete extra[key];
+	extra.completed = todayRaw();
+	task.extra = extra;
+	task.archived = true;
+
+	const at = store.tasks.indexOf(task);
+	if (at >= 0) store.tasks.splice(at, 1);
+	const firstArchived = store.tasks.findIndex((other) => other.archived);
+	store.tasks.splice(firstArchived < 0 ? store.tasks.length : firstArchived, 0, task);
+}
+
+export function markDone(store: Store, task: Task, summary: string, cascade = true): void {
 	task.status = "done";
 	task.summary = summary;
 	task.done_at = new Date().toISOString();
-	store.loop.current = "";
+	archiveTask(store, task);
+	if (store.loop.current === task.id) store.loop.current = "";
 	store.loop.last_failure = "";
-	rollup(store);
+	if (cascade) rollup(store);
 }
 
 export function markBlocked(store: Store, task: Task, reason: string): void {
@@ -398,8 +740,13 @@ export function promoteToScope(store: Store, task: Task, reason: string): void {
 	store.loop.last_failure = "";
 }
 
+export interface TreeOptions {
+	/** Include tasks that have already been archived. Off by default: the archive can be long. */
+	all?: boolean;
+}
+
 /** Indented one-line-per-task view for `todo status` and the /todo-status command. */
-export function renderTree(store: Store): string {
+export function renderTree(store: Store, options: TreeOptions = {}): string {
 	const marks: Record<TaskStatus, string> = { todo: "○", doing: "◐", done: "✓", blocked: "✗" };
 	const lines: string[] = [];
 
@@ -417,14 +764,18 @@ export function renderTree(store: Store): string {
 		return level;
 	};
 
-	for (const task of store.tasks) {
+	for (const task of workingOrder(store)) {
+		if (task.archived && !options.all) continue;
 		const indent = "  ".repeat(depth(task));
 		const attempts = task.attempts > 0 && task.status !== "done" ? ` (${task.attempts} attempts)` : "";
 		const reason = task.status === "blocked" && task.reason ? ` — ${task.reason}` : "";
 		const level = levelOf(task) === "task" ? "" : ` [${levelOf(task)}]`;
 		const pending = needsBreakdown(task, store.tasks) ? " — needs breaking down" : "";
 		const over = task.overflowed ? " ⚠ too coarse" : "";
-		lines.push(`${indent}${marks[task.status]} ${task.id}${level}: ${task.title}${attempts}${pending}${reason}${over}`);
+		const shipped = task.archived ? " (archived)" : "";
+		lines.push(
+			`${indent}${marks[task.status]} ${task.id}${level}: ${task.title}${attempts}${pending}${reason}${over}${shipped}`,
+		);
 	}
 
 	return lines.join("\n");
