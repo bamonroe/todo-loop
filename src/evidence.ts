@@ -89,8 +89,30 @@ export async function headCommit(cwd: string): Promise<string> {
 	return (await git(cwd, ["rev-parse", "HEAD"])).trim();
 }
 
-export async function isTreeClean(cwd: string): Promise<boolean> {
-	return (await git(cwd, ["status", "--porcelain"])).trim() === "";
+/**
+ * Clean enough to start a task in. `ignore` drops the files the loop itself
+ * owns, and it is not a nicety: `todo run` writes its own state file before the
+ * first iteration, so without this the loop dirties the tree and then refuses
+ * to start because the tree is dirty — on every repo where that file is not
+ * committed yet, which is every first run.
+ *
+ * Callers that want the strict question — did `git add -A` actually stage
+ * anything — pass nothing.
+ */
+export async function isTreeClean(cwd: string, ignore: string[] = []): Promise<boolean> {
+	const status = (await git(cwd, ["status", "--porcelain"])).trim();
+	if (!status) return true;
+	if (!ignore.length) return false;
+	const ignored = new Set(ignore);
+	return status.split("\n").every((line) => ignored.has(statusPath(line)));
+}
+
+/** The path a --porcelain line refers to; a rename reports "old -> new". */
+function statusPath(line: string): string {
+	const body = line.slice(3).trim();
+	const arrow = body.indexOf(" -> ");
+	const file = arrow === -1 ? body : body.slice(arrow + 4);
+	return file.replace(/^"(.*)"$/, "$1");
 }
 
 export async function commitAll(cwd: string, message: string): Promise<boolean> {
@@ -106,6 +128,21 @@ export async function commitAll(cwd: string, message: string): Promise<boolean> 
  * a task that touched nothing else look like it did something.
  */
 export const DEFAULT_EXCLUDES = ["todo.toml", "todoloop.toml"];
+
+/**
+ * The queue files the loop writes, relative to `cwd` and deduplicated. Which
+ * ones those are depends on the schema — a project queue is three files, not
+ * one — so the list is built from the store rather than fixed.
+ */
+export function loopOwnedPaths(cwd: string, files: Array<string | undefined>): string[] {
+	const relative = (file?: string): string | undefined => {
+		if (!file) return undefined;
+		const rel = path.relative(cwd, file);
+		return rel && !rel.startsWith("..") ? rel : undefined;
+	};
+	const paths = [...files.map(relative), ...DEFAULT_EXCLUDES];
+	return [...new Set(paths.filter((value): value is string => Boolean(value)))];
+}
 
 function excludeSpecs(exclude: string[]): string[] {
 	return exclude.length ? ["--", ...exclude.map((path) => `:(exclude)${path}`)] : [];

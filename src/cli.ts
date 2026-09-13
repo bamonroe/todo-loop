@@ -19,7 +19,7 @@ import {
 	type Config,
 } from "./config.ts";
 import { diagnose, formatChecks } from "./doctor.ts";
-import { commitAll, DEFAULT_EXCLUDES, gatherEvidence, headCommit, isGitRepo, isTreeClean } from "./evidence.ts";
+import { commitAll, gatherEvidence, headCommit, isGitRepo, isTreeClean, loopOwnedPaths } from "./evidence.ts";
 import { renderAssignmentPrompt } from "./prompt.ts";
 import { checkDecomposition } from "./decompose.ts";
 import {
@@ -122,18 +122,7 @@ function loadEnv(flags: Flags): Env {
  * is built from the store rather than fixed.
  */
 function queueExcludes(env: Env): string[] {
-	const relative = (file?: string): string | undefined => {
-		if (!file) return undefined;
-		const rel = path.relative(env.cwd, file);
-		return rel && !rel.startsWith("..") ? rel : undefined;
-	};
-	const paths = [
-		relative(env.storeFile),
-		relative(env.store.archive?.file),
-		relative(env.store.sidecarFile),
-		...DEFAULT_EXCLUDES,
-	];
-	return [...new Set(paths.filter((value): value is string => Boolean(value)))];
+	return loopOwnedPaths(env.cwd, [env.storeFile, env.store.archive?.file, env.store.sidecarFile]);
 }
 
 function verifierFor(env: Env, signal?: AbortSignal) {
@@ -234,7 +223,13 @@ function commandInit(env: Env, flags: Flags): number {
 }
 
 async function commandDoctor(env: Env, flags: Flags): Promise<number> {
-	const checks = await diagnose({ cwd: env.cwd, config: env.config, store: env.store, probe: bool(flags, "probe") });
+	const checks = await diagnose({
+		cwd: env.cwd,
+		config: env.config,
+		store: env.store,
+		storeFile: env.storeFile,
+		probe: bool(flags, "probe"),
+	});
 	console.log(formatChecks(checks));
 	const failures = checks.filter((check) => check.level === "fail").length;
 	if (failures) console.error(`\n${failures} blocking problem${failures === 1 ? "" : "s"}.`);
@@ -577,7 +572,7 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 			return EXIT_OK;
 		}
 
-		if (env.config.loop.checkpoint === "require-clean" && !(await isTreeClean(env.cwd))) {
+		if (env.config.loop.checkpoint === "require-clean" && !(await isTreeClean(env.cwd, queueExcludes(env)))) {
 			console.error("working tree is dirty and checkpoint = require-clean; refusing to start a task");
 			env.store.loop.running = false;
 			persist();

@@ -4,7 +4,16 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, before, test } from "node:test";
-import { changedFiles, collectDiff, commitAll, gatherEvidence, headCommit, isTreeClean, runCommand } from "../src/evidence.ts";
+import {
+	changedFiles,
+	collectDiff,
+	commitAll,
+	gatherEvidence,
+	headCommit,
+	isTreeClean,
+	loopOwnedPaths,
+	runCommand,
+} from "../src/evidence.ts";
 
 let repo: string;
 let base: string;
@@ -157,4 +166,40 @@ test("a commit keeps its subject on one line", async () => {
 	assert.match(execFileSync("git", ["log", "-1", "--format=%b"], { cwd: scratch, encoding: "utf8" }), /also adds a test/);
 
 	fs.rmSync(scratch, { recursive: true, force: true });
+});
+
+test("the loop's own state file does not count as a dirty tree", async () => {
+	// The bug this pins: `todo run` writes its state file before the first
+	// iteration, then checked cleanliness — so it refused to start on dirt it
+	// had just made itself, on every repo where that file was not yet committed.
+	const sidecar = path.join(repo, "TODO.todoloop-state.toml");
+	fs.writeFileSync(sidecar, "task = []\n");
+	try {
+		assert.equal(await isTreeClean(repo), false);
+		assert.equal(await isTreeClean(repo, ["TODO.todoloop-state.toml"]), true);
+
+		// Real work alongside it still stops the loop.
+		fs.writeFileSync(path.join(repo, "server.ts"), "export const port = 4000;\n");
+		assert.equal(await isTreeClean(repo, ["TODO.todoloop-state.toml"]), false);
+	} finally {
+		fs.rmSync(sidecar, { force: true });
+		git("checkout", "--", "server.ts");
+	}
+});
+
+test("loopOwnedPaths lists the queue relative to the repo, and nothing outside it", () => {
+	const owned = loopOwnedPaths(repo, [
+		path.join(repo, "TODO.toml"),
+		path.join(repo, "FINISHED.toml"),
+		path.join(repo, "TODO.todoloop-state.toml"),
+		"/somewhere/else/todo.toml",
+		undefined,
+	]);
+	assert.deepEqual(owned, [
+		"TODO.toml",
+		"FINISHED.toml",
+		"TODO.todoloop-state.toml",
+		"todo.toml",
+		"todoloop.toml",
+	]);
 });

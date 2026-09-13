@@ -28,6 +28,7 @@ import {
 	headCommit,
 	isGitRepo,
 	isTreeClean,
+	loopOwnedPaths,
 	truncateTail,
 } from "../src/evidence.ts";
 import { renderAssignmentPrompt, renderPinnedTask } from "../src/prompt.ts";
@@ -130,6 +131,9 @@ export default function (pi: ExtensionAPI) {
 
 	const read = (): Store => loadStore(storeFile);
 	const write = (store: Store): void => saveStore(storeFile, store);
+	/** The files the loop writes: out of the verifier's diff, and out of the dirty check. */
+	const ownedPaths = (store: Store): string[] =>
+		loopOwnedPaths(cwd, [storeFile, store.archive?.file, store.sidecarFile]);
 
 	const say = (ctx: ExtensionContext, message: string, level: "info" | "warning" | "error" = "info"): void => {
 		if (ctx.hasUI) ctx.ui.notify(message, level);
@@ -184,6 +188,7 @@ export default function (pi: ExtensionAPI) {
 			requireTestsPass: decomposing ? false : config.verify.require_tests_pass,
 			timeoutMs: config.verify.timeout_ms,
 			maxBytes: config.verify.max_evidence_bytes,
+			exclude: ownedPaths(store),
 		});
 
 		// A breakdown is judged entirely by tooling — no model, no network, no cost.
@@ -246,7 +251,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		if (config.loop.checkpoint === "require-clean" && !(await isTreeClean(cwd))) {
+		if (config.loop.checkpoint === "require-clean" && !(await isTreeClean(cwd, ownedPaths(store)))) {
 			store.loop.running = false;
 			write(store);
 			say(ctx, "Working tree is dirty and checkpoint = require-clean. Commit or stash, then /todo-run.", "error");

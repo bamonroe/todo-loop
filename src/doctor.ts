@@ -17,7 +17,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { Config } from "./config.ts";
 import { inheritsWorker, isLocalRef, piDefaultRef, splitModelRef } from "./config.ts";
-import { isGitRepo, isTreeClean } from "./evidence.ts";
+import { isGitRepo, isTreeClean, loopOwnedPaths } from "./evidence.ts";
 import { endpointFor, piAuthProviders, REMOTE_PROVIDERS, type Endpoint } from "./providers.ts";
 import {
 	activeTasks,
@@ -300,6 +300,8 @@ export interface DoctorOptions {
 	cwd: string;
 	config: Config;
 	store: Store;
+	/** The active queue file, so the git check can ignore the files the loop writes. */
+	storeFile?: string;
 	probe: boolean;
 }
 
@@ -481,7 +483,10 @@ export async function diagnose(options: DoctorOptions): Promise<Check[]> {
 	);
 
 	if (await isGitRepo(cwd)) {
-		const clean = await isTreeClean(cwd);
+		// Same exclusions the run loop uses: a queue file the loop is about to
+		// rewrite anyway is not work that would get swept into the wrong commit.
+		const owned = loopOwnedPaths(cwd, [options.storeFile, store.archive?.file, store.sidecarFile]);
+		const clean = await isTreeClean(cwd, owned);
 		checks.push({
 			level: clean || config.loop.checkpoint !== "require-clean" ? "ok" : "fail",
 			label: "git",
