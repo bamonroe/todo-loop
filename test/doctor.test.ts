@@ -21,6 +21,7 @@ title = "Build the health API"
 [[task]]
 id = "api.route"
 title = "Add GET /health returning 200"
+detail = "Register the route in src/server.ts and return a JSON body with status and uptime."
 `),
 	);
 	assert.equal(checks.length, 1);
@@ -80,6 +81,7 @@ detail = "This text never reaches a model."
 [[task]]
 id = "api.route"
 title = "Add GET /health returning 200"
+detail = "Register the route in src/server.ts and return a JSON body with status and uptime."
 `),
 	);
 	assert.equal(levelOf(checks, "detail on non-leaf tasks"), "warn");
@@ -118,6 +120,7 @@ level = "task"
 [[task]]
 id = "api.route"
 title = "Add GET /health returning 200"
+detail = "Register the route in src/server.ts and return a JSON body with status and uptime."
 `),
 	);
 	assert.equal(levelOf(checks, "tasks with children"), "fail");

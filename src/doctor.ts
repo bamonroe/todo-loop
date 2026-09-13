@@ -221,6 +221,23 @@ export function auditQueue(store: Store): Check[] {
 		});
 	}
 
+	// The worker sees the task text and nothing else — not this file, not the
+	// conversation that produced it. A leaf with no prose is a title handed to a
+	// model and a verifier asked to judge a diff against it, which is how a task
+	// gets "finished" three different ways.
+	const bare = active.filter(
+		(task) => isLeaf(task, store.tasks) && task.status === "todo" && levelOf(task) === "task" && !task.detail,
+	);
+	if (bare.length) {
+		checks.push({
+			level: "warn",
+			label: "leaf tasks with no detail",
+			detail:
+				`${bare.map((task) => task.id).join(", ")} — the worker will see the title and nothing else. ` +
+				"Name the files and say what done looks like, or the verifier has nothing to judge against.",
+		});
+	}
+
 	const thin = active.filter(
 		(task) => isLeaf(task, store.tasks) && task.status === "todo" && task.title.length < MIN_TITLE_LENGTH,
 	);
