@@ -49,9 +49,15 @@ timeout_ms = 300000
 
 [loop]
 max_iterations = 50
-# commit: auto-commit each verified task. require-clean: refuse to start a task
-# with a dirty tree. off: ignore git entirely.
-checkpoint = "commit"
+# require-clean: commit each verified task, and refuse to *start* one while the
+# tree is dirty. commit: the same without that guard. off: ignore git entirely.
+#
+# Default is require-clean because the commit is `git add -A`. Anything already
+# uncommitted when the loop starts is swept into a commit named after a task
+# that did not do it, and the diff the verifier judges is wrong by the same
+# amount. Refusing to start costs one `git stash`; the alternative costs a
+# tangled history you find later.
+checkpoint = "require-clean"
 commit_prefix = "todo"
 # A run that ends without calling todo_complete never advances the queue.
 # halt: stop and wait for a human. retry: re-issue the task in a fresh session,

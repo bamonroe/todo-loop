@@ -42,7 +42,16 @@ export interface Config {
 	};
 	loop: {
 		max_iterations: number;
-		/** commit: auto-commit each verified task. require-clean: refuse to advance with a dirty tree. off: ignore git. */
+		/**
+		 * A ladder of strictness, each rung doing what the one below it does:
+		 * "off" ignores git, "commit" auto-commits each verified task, and
+		 * "require-clean" commits *and* refuses to start a task with a dirty tree.
+		 *
+		 * "require-clean" is the default because the commit is `git add -A`: work
+		 * already in the tree when the loop starts gets swept into a commit named
+		 * after a task that did not do it, and the task's own diff is then wrong
+		 * for the verifier too. Refusing to start is the cheap end of that.
+		 */
 		checkpoint: "commit" | "require-clean" | "off";
 		commit_prefix: string;
 		/** What to do when a run ends without the worker calling todo_complete. */
@@ -103,7 +112,7 @@ export const DEFAULT_CONFIG: Config = {
 	},
 	loop: {
 		max_iterations: 50,
-		checkpoint: "commit",
+		checkpoint: "require-clean",
 		commit_prefix: "todo",
 		on_silent_stop: "halt",
 	},

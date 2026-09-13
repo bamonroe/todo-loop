@@ -43,6 +43,16 @@ export interface Schema {
 	archives: boolean;
 	/** True when the loop's bookkeeping must be kept out of the task tables. */
 	sidecar: boolean;
+	/**
+	 * Bookkeeping keys this schema has a home for, and which therefore stay on
+	 * the task even when everything else moves to the sidecar.
+	 *
+	 * `reason` is the case this exists for: the loop's "why I blocked it" and the
+	 * project's "why it is blocked" are the same fact, and the project's own
+	 * validator requires it alongside a blocked status. Writing the status
+	 * without the reason would leave a file its owner rejects.
+	 */
+	sharedFields: string[];
 	/** Field write-order for tasks the loop creates, so new rows match old ones. */
 	fieldOrder: string[];
 }
@@ -55,6 +65,7 @@ export const NATIVE_SCHEMA: Schema = {
 	ranked: false,
 	archives: false,
 	sidecar: false,
+	sharedFields: [],
 	fieldOrder: [
 		"id",
 		"title",
@@ -92,13 +103,16 @@ export const PROJECT_SCHEMA: Schema = {
 	ranked: true,
 	archives: true,
 	sidecar: true,
+	sharedFields: ["reason"],
 	fieldOrder: [
 		"id",
 		"title",
 		"description",
 		"status",
+		"reason",
 		"level",
 		"parent",
+		"blocked_by",
 		"category",
 		"urgency",
 		"order",

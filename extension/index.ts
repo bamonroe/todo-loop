@@ -212,7 +212,8 @@ export default function (pi: ExtensionAPI) {
 
 	// Subject stays short and scannable; the worker's summary goes in the body.
 	const checkpoint = async (task: Task, body: string): Promise<void> => {
-		if (config.loop.checkpoint !== "commit") return;
+		// See the ladder in src/config.ts: everything above "off" commits.
+		if (config.loop.checkpoint === "off") return;
 		if (!(await isGitRepo(cwd))) return;
 		const subject = `${config.loop.commit_prefix}(${task.id}): ${task.title}`;
 		await commitAll(cwd, body.trim() ? `${subject}\n\n${body.trim()}` : subject);
@@ -261,6 +262,7 @@ export default function (pi: ExtensionAPI) {
 		const kickoff = renderAssignmentPrompt(store, task, {
 			mode: "tool",
 			lastFailure: store.loop.last_failure,
+			rejections: task.rejections,
 			attempts: task.attempts,
 			maxAttempts: config.verify.max_attempts,
 			maxFiles: config.atomic.max_files,

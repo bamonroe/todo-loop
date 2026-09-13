@@ -22,6 +22,8 @@ import { endpointFor, piAuthProviders, REMOTE_PROVIDERS, type Endpoint } from ".
 import {
 	activeTasks,
 	allowedChildLevels,
+	blockedLeaves,
+	blockersOf,
 	counts,
 	effectiveLevel,
 	findTask,
@@ -230,6 +232,35 @@ export function auditQueue(store: Store): Check[] {
 		});
 	}
 
+	// A blocker naming a task that is not in either file can never be satisfied,
+	// so the task behind it is not deferred — it is unreachable, permanently.
+	const known = new Set(store.tasks.map((task) => task.id));
+	const danglingBlockers = active.flatMap((task) =>
+		blockersOf(task)
+			.filter((id) => !known.has(id))
+			.map((id) => `${task.id} → ${id}`),
+	);
+	if (danglingBlockers.length) {
+		checks.push({
+			level: "fail",
+			label: "blockers that do not exist",
+			detail: `${danglingBlockers.join(", ")} — these tasks can never become ready`,
+		});
+	}
+
+	const waiting = blockedLeaves(store);
+	if (waiting.length) {
+		checks.push({
+			level: nextLeaf(store) ? "ok" : "fail",
+			label: "waiting on dependencies",
+			detail:
+				`${waiting.map((entry) => `${entry.task.id} (needs ${entry.waitingOn.join(", ")})`).join(", ")}` +
+				(nextLeaf(store)
+					? " — skipped until their blockers ship"
+					: " — and nothing else is runnable, so the queue is stuck rather than finished"),
+		});
+	}
+
 	const stats = counts(store);
 	const archived = store.tasks.length - active.length;
 	const activeLeaves = active.filter((task) => isLeaf(task, store.tasks)).length;
@@ -241,6 +272,7 @@ export function auditQueue(store: Store): Check[] {
 			(archived ? `, ${archived} archived` : "") +
 			`, ${activeLeaves} leaves, ${stats.todo} todo, ${stats.blocked} blocked` +
 			(stats.pending_breakdowns ? `, ${stats.pending_breakdowns} awaiting breakdown` : "") +
+			(waiting.length ? `, ${waiting.length} waiting on dependencies` : "") +
 			(nextLeaf(store) ? `, next is ${nextLeaf(store)?.id}` : ", nothing runnable"),
 	});
 

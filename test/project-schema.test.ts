@@ -5,18 +5,24 @@ import * as path from "node:path";
 import { test } from "node:test";
 import {
 	archivePathFor,
+	blockedLeaves,
 	childrenOf,
 	findTask,
 	loadStore,
+	markBlocked,
 	markDone,
 	needsBreakdown,
 	nextLeaf,
 	parseStore,
+	recordFailure,
+	renderTree,
 	resolveStorePath,
 	saveStore,
 	serializeArchive,
 	serializeStore,
+	unmetBlockers,
 	workingOrder,
+	type Task,
 } from "../src/store.ts";
 import { detectSchema, NATIVE_SCHEMA, PROJECT_SCHEMA, urgencyRank } from "../src/schema.ts";
 import { parseToml } from "../src/toml.ts";
@@ -214,6 +220,8 @@ test("bookkeeping goes to the sidecar and never into the project's file", () => 
 	const urgent = findTask(store, "urgent");
 	assert.ok(urgent);
 	urgent.attempts = 2;
+	// Not blocked, so this is a note about a retry rather than the queue's own
+	// `reason` field, and it belongs in the sidecar with the attempt count.
 	urgent.reason = "the route is never registered";
 	store.loop.running = true;
 	store.loop.current = "urgent";
@@ -245,4 +253,103 @@ test("saving writes both files", () => {
 
 	assert.ok(!fs.readFileSync(file, "utf8").includes('id = "urgent"'));
 	assert.match(fs.readFileSync(path.join(dir, "FINISHED.toml"), "utf8"), /id = "urgent"/);
+});
+
+const GATED = `schema_version = 1
+
+[meta]
+title = "TODO"
+archive = "FINISHED.toml"
+
+[[task]]
+id = "lock"
+title = "Lock a point in place"
+description = "The constraint everything else needs."
+status = "active"
+level = "task"
+category = "feature"
+urgency = "normal"
+order = 20
+created = 2026-09-12
+tags = []
+
+[[task]]
+id = "teal"
+title = "Colour the sketch when fully constrained"
+description = "Unreachable until Lock exists."
+status = "active"
+level = "task"
+blocked_by = ["lock"]
+category = "feature"
+urgency = "critical"
+order = 10
+created = 2026-09-12
+tags = []
+`;
+
+test("a leaf waiting on a dependency is skipped, however urgent", () => {
+	const store = parseStore(GATED, { archiveText: "", archiveFile: "FINISHED.toml" });
+	// `teal` is critical and first by order; it still loses to the task it needs.
+	assert.equal(nextLeaf(store)?.id, "lock");
+	assert.deepEqual(unmetBlockers(findTask(store, "teal") as Task, store.tasks), ["lock"]);
+	assert.equal(blockedLeaves(store).length, 1);
+});
+
+test("finishing the blocker releases what was waiting on it", () => {
+	const store = parseStore(GATED, { archiveText: "", archiveFile: "FINISHED.toml" });
+	markDone(store, findTask(store, "lock") as Task, "shipped");
+	assert.equal(nextLeaf(store)?.id, "teal");
+	assert.equal(blockedLeaves(store).length, 0);
+});
+
+test("a blocker that does not exist never opens", () => {
+	const store = parseStore(GATED.replace('["lock"]', '["typo"]'), {
+		archiveText: "",
+		archiveFile: "FINISHED.toml",
+	});
+	// An unknown id is unmet, not satisfied: one typo must not silently disable
+	// the guard. `lock` is still runnable, so the queue moves; `teal` does not.
+	assert.equal(nextLeaf(store)?.id, "lock");
+	assert.deepEqual(blockedLeaves(store)[0]?.waitingOn, ["typo"]);
+});
+
+test("the tree says what a task is waiting on", () => {
+	const store = parseStore(GATED, { archiveText: "", archiveFile: "FINISHED.toml" });
+	assert.match(renderTree(store), /teal: Colour the sketch when fully constrained — waiting on lock/);
+});
+
+test("blocked_by survives a round trip untouched", () => {
+	const store = parseStore(GATED, { archiveText: "", archiveFile: "FINISHED.toml" });
+	assert.equal(serializeStore(store), GATED);
+});
+
+test("rejections accumulate instead of replacing each other", () => {
+	const store = parseStore(GATED, { archiveText: "", archiveFile: "FINISHED.toml" });
+	const lock = findTask(store, "lock") as Task;
+	assert.equal(recordFailure(store, lock, "no test covers it"), 1);
+	assert.equal(recordFailure(store, lock, "the test is skipped"), 2);
+	assert.deepEqual(lock.rejections, ["no test covers it", "the test is skipped"]);
+
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "todoloop-reject-"));
+	const file = path.join(dir, "TODO.toml");
+	fs.writeFileSync(file, GATED);
+	fs.writeFileSync(path.join(dir, "FINISHED.toml"), FINISHED);
+	const onDisk = loadStore(file);
+	const target = findTask(onDisk, "lock") as Task;
+	recordFailure(onDisk, target, "first");
+	recordFailure(onDisk, target, "second");
+	saveStore(file, onDisk);
+	// The history is the loop's, so it goes to the sidecar like every other
+	// attempt counter — the project's queue never sees it.
+	assert.ok(!fs.readFileSync(file, "utf8").includes("rejections"));
+	assert.deepEqual(findTask(loadStore(file), "lock")?.rejections, ["first", "second"]);
+});
+
+test("blocking a task writes the reason the project's validator insists on", () => {
+	const store = parseStore(GATED, { archiveText: "", archiveFile: "FINISHED.toml" });
+	markBlocked(store, findTask(store, "lock") as Task, "OpenCASCADE will not build in the container");
+	const written = serializeStore(store);
+	// The project CLI requires the pair and rejects a blocked task without a
+	// reason, so writing one half would leave a file its owner will not accept.
+	assert.match(written, /status = "blocked"\nreason = "OpenCASCADE will not build in the container"/);
 });

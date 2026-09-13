@@ -74,7 +74,43 @@ The archive is read as well as written. A scope that was broken down and has
 since shipped its children would otherwise look untouched, and the loop would
 break it down a second time into duplicate children.
 
+`blocked_by` on a task, where the schema has it, is honoured: a leaf whose
+blockers have not shipped is skipped rather than handed out. See
+[Work the loop should not start yet](#work-the-loop-should-not-start-yet).
+
 `todo status` hides archived work; `todo status --all` includes it.
+
+## Work the loop should not start yet
+
+A task can be well written, correctly implemented and fully tested, and still be
+worthless — because the state it addresses cannot be reached until some other
+task ships. Verification will not catch it. The verifier is asked whether the
+diff does what the task said, and it does; nobody is asked whether the task was
+worth doing yet. Unattended, that is a whole night spent building something
+correct for a program state that does not exist.
+
+So a task may declare `blocked_by`, a list of ids that must be `done` first:
+
+```toml
+[[task]]
+id = "colour-when-fully-constrained"
+title = "Colour the sketch when it has no freedom left"
+blocked_by = ["lock-a-point"]
+```
+
+- **A blocked leaf is skipped, not queued behind.** The loop moves to the next
+  runnable task, so declaring a dependency reorders work rather than stopping
+  it. Urgency does not override a gate: something that cannot be started is not
+  more startable for being important.
+- **A blocker that is not in the queue counts as unmet.** Treating an unknown id
+  as "nothing in the way" turns one typo into a silently disabled guard.
+  `todo doctor` fails on it by name, because that task can never become ready.
+- **Nothing runnable is reported as two different things.** A queue with work
+  left that is only waiting on dependencies is *stuck*, and `todo status` and
+  `todo doctor` both say so rather than letting it read as finished.
+
+The loop never creates a dependency — it only refuses to ignore one. A schema
+without the field simply never has any.
 
 ## Check the setup first
 
@@ -206,6 +242,13 @@ in `.pi/extensions/`.
 5. On a fail: the rejection lands in the worker's context *without* terminating
    the turn, so it continues where it is rather than starting cold. Three
    strikes and the task is marked `blocked` and the loop halts.
+
+Rejections accumulate. A retry is shown **every** verdict the task has collected
+so far, oldest first, not just the most recent one — a worker told only why the
+last attempt failed has no way of knowing the one before it was rejected for the
+opposite reason, and oscillating between two wrong answers is the characteristic
+failure of a retry loop with no memory. `todo reset <id>` clears the history
+along with the attempt count.
 
 A verifier that is unreachable, or that returns something unparseable, fails
 closed. Silence is never a pass.
@@ -375,7 +418,13 @@ matter most:
   called. `todo doctor` warns when neither is set.
 - `verify.max_attempts` — the cap that stops a slightly-too-strict verifier from
   becoming an unbounded token burn.
-- `loop.checkpoint` — `commit` (default), `require-clean`, or `off`.
+- `loop.checkpoint` — a ladder of strictness, each rung doing what the one below
+  it does: `off` ignores git, `commit` auto-commits each verified task, and
+  `require-clean` (default) commits *and* refuses to start a task while the tree
+  is dirty. That is the default because the commit is `git add -A`: anything
+  already uncommitted when the loop starts is swept into a commit named after a
+  task that did not do it, and the diff the verifier judges is wrong by the same
+  amount. Refusing to start costs one `git stash`.
 - `loop.on_silent_stop` — `halt` (default) or `retry`.
 - `decompose.min_children` — smallest breakdown accepted **from an epic**,
   default 2. Scopes are exempt; see

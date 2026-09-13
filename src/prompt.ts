@@ -24,12 +24,38 @@ export interface PromptOptions {
 	/** "tool" expects the worker to call todo_complete; "standalone" is the one-shot shell driver. */
 	mode: "tool" | "standalone";
 	lastFailure?: string;
+	/** Every rejection so far, oldest first. Preferred over lastFailure when present. */
+	rejections?: string[];
 	attempts?: number;
 	maxAttempts?: number;
 	/** Files a leaf task may touch before it counts as too coarse. */
 	maxFiles?: number;
 	/** Smallest accepted breakdown. */
 	minChildren?: number;
+}
+
+/**
+ * The rejection block.
+ *
+ * Shows every verdict so far rather than the last one. A worker on attempt three
+ * that is told only why attempt two failed has no way of knowing attempt one was
+ * rejected for the opposite reason, and oscillating between two wrong answers is
+ * the characteristic failure of a retry loop with no memory.
+ */
+function rejectionBlock(heading: string, options: PromptOptions, closing: string): string | undefined {
+	const history = options.rejections?.length ? options.rejections : options.lastFailure ? [options.lastFailure] : [];
+	if (!history.length) return undefined;
+	const attempt = options.attempts ?? history.length;
+	const cap = options.maxAttempts ?? 3;
+	const lines = [`## ${heading} (attempt ${attempt} of ${cap})`];
+	if (history.length === 1) {
+		lines.push(history[0].trim());
+	} else {
+		lines.push("Every attempt so far, oldest first. Do not retry an approach already rejected here.");
+		history.forEach((reason, index) => lines.push(`${index + 1}. ${reason.trim()}`));
+	}
+	lines.push(closing);
+	return lines.join("\n");
 }
 
 /** "a scope" but "an epic" — the level is interpolated into prose all over this file. */
@@ -133,17 +159,12 @@ export function renderDecomposePrompt(store: Store, task: Task, options: PromptO
 				].join("\n"),
 	);
 
-	if (options.lastFailure) {
-		const attempt = options.attempts ?? 0;
-		const cap = options.maxAttempts ?? 3;
-		parts.push(
-			[
-				`## Previous breakdown was rejected (attempt ${attempt} of ${cap})`,
-				options.lastFailure.trim(),
-				"Fix exactly what is listed. Children that were already accepted stay as they are.",
-			].join("\n"),
-		);
-	}
+	const rejected = rejectionBlock(
+		"Previous breakdown was rejected",
+		options,
+		"Fix exactly what is listed. Children that were already accepted stay as they are.",
+	);
+	if (rejected) parts.push(rejected);
 
 	return parts.join("\n\n");
 }
@@ -164,17 +185,12 @@ export function renderTaskPrompt(store: Store, task: Task, options: PromptOption
 		].join("\n"),
 	);
 
-	if (options.lastFailure) {
-		const attempt = options.attempts ?? 0;
-		const cap = options.maxAttempts ?? 3;
-		parts.push(
-			[
-				`## Previous attempt was rejected (attempt ${attempt} of ${cap})`,
-				options.lastFailure.trim(),
-				"Address exactly what is missing. Do not redesign work that was already accepted.",
-			].join("\n"),
-		);
-	}
+	const rejected = rejectionBlock(
+		"Previous attempt was rejected",
+		options,
+		"Address exactly what is missing. Do not redesign work that was already accepted.",
+	);
+	if (rejected) parts.push(rejected);
 
 	parts.push(
 		options.mode === "tool"

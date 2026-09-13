@@ -25,6 +25,7 @@ import { checkDecomposition } from "./decompose.ts";
 import {
 	allowedChildLevels,
 	assignmentFor,
+	blockedLeaves,
 	counts,
 	createTask,
 	DEFAULT_STORE_FILE,
@@ -258,9 +259,11 @@ function queueLine(env: Env): string {
 function commandStatus(env: Env, flags: Flags): number {
 	const stats = counts(env.store);
 	const tree = renderTree(env.store, { all: bool(flags, "all") });
+	const waiting = blockedLeaves(env.store);
 	console.log(tree || "(no tasks)");
 	console.log(
 		`\n${stats.done} done · ${stats.todo} todo · ${stats.doing} in progress · ${stats.blocked} blocked` +
+			(waiting.length ? ` · ${waiting.length} waiting on dependencies` : "") +
 			(stats.pending_breakdowns ? ` · ${stats.pending_breakdowns} awaiting breakdown` : "") +
 			`\n${queueLine(env)}` +
 			`\nloop: ${env.store.loop.running ? "running" : "stopped"}` +
@@ -268,6 +271,13 @@ function commandStatus(env: Env, flags: Flags): number {
 			` · iteration ${env.store.loop.iterations}`,
 	);
 	if (env.store.loop.last_failure) console.log(`last failure: ${env.store.loop.last_failure}`);
+	// The distinction worth drawing loudly: a queue with nothing runnable is
+	// either finished or stuck, and those call for opposite responses.
+	if (waiting.length && !nextLeaf(env.store)) {
+		console.log(
+			`\nnothing is runnable, but ${waiting.length} task(s) are only waiting on dependencies — the queue is stuck, not done.`,
+		);
+	}
 	return EXIT_OK;
 }
 
@@ -290,6 +300,7 @@ function commandNext(env: Env, flags: Flags): number {
 		renderAssignmentPrompt(env.store, task, {
 			mode: "standalone",
 			lastFailure: env.store.loop.last_failure,
+			rejections: task.rejections,
 			attempts: task.attempts,
 			maxAttempts: env.config.verify.max_attempts,
 			maxFiles: env.config.atomic.max_files,
@@ -405,6 +416,9 @@ function commandReset(env: Env, flags: Flags): number {
 	task.reason = undefined;
 	task.done_at = undefined;
 	task.summary = undefined;
+	// "Clear attempts" has to mean the history too, or a reset task carries three
+	// rejections into a prompt that says it is on attempt one.
+	task.rejections = undefined;
 	env.store.loop.last_failure = "";
 	saveStore(env.storeFile, env.store);
 	console.log(`${id} reset`);
@@ -455,7 +469,10 @@ async function commandComplete(env: Env, flags: Flags): Promise<number> {
 
 /** Subject stays short and scannable; the verdict, which can run to a paragraph, goes in the body. */
 async function checkpoint(env: Env, task: Task, body: string): Promise<void> {
-	if (env.config.loop.checkpoint !== "commit") return;
+	// A strictness ladder: "off" commits nothing, "commit" commits, and
+	// "require-clean" commits *and* refuses to start dirty. Anything but "off"
+	// therefore commits here.
+	if (env.config.loop.checkpoint === "off") return;
 	if (!(await isGitRepo(env.cwd))) return;
 	const subject = `${env.config.loop.commit_prefix}(${task.id}): ${task.title}`;
 	const message = body.trim() ? `${subject}\n\n${body.trim()}` : subject;
@@ -574,6 +591,7 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 		const prompt = renderAssignmentPrompt(env.store, task, {
 			mode: "standalone",
 			lastFailure: env.store.loop.last_failure,
+			rejections: task.rejections,
 			attempts: task.attempts,
 			maxAttempts: env.config.verify.max_attempts,
 			maxFiles: env.config.atomic.max_files,

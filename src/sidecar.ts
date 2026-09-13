@@ -28,6 +28,8 @@ export interface TaskState {
 	reason?: string;
 	overflowed?: boolean;
 	overflow_reason?: string;
+	/** Every rejection this task has collected, oldest first. */
+	rejections?: string[];
 }
 
 export interface LoopState {
@@ -104,6 +106,10 @@ export function parseSidecar(text: string): Sidecar {
 		if (row.overflowed === true) state.overflowed = true;
 		const overflowReason = asString(row.overflow_reason);
 		if (overflowReason) state.overflow_reason = overflowReason;
+		if (Array.isArray(row.rejections)) {
+			const kept = row.rejections.map((value) => asString(value)).filter(Boolean);
+			if (kept.length) state.rejections = kept;
+		}
 		tasks.set(id, state);
 	}
 
@@ -128,7 +134,8 @@ function isEmptyState(state: TaskState): boolean {
 		!state.summary &&
 		!state.reason &&
 		!state.overflowed &&
-		!state.overflow_reason
+		!state.overflow_reason &&
+		!state.rejections?.length
 	);
 }
 
@@ -143,6 +150,7 @@ export function serializeSidecar(sidecar: Sidecar): string {
 		if (state.reason) row.reason = state.reason;
 		if (state.overflowed) row.overflowed = true;
 		if (state.overflow_reason) row.overflow_reason = state.overflow_reason;
+		if (state.rejections?.length) row.rejections = state.rejections;
 		rows.push(row);
 	}
 

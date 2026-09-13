@@ -72,6 +72,14 @@ export interface Task {
 	/** Why `overflowed` was set — shown in status and doctor. */
 	overflow_reason?: string;
 	/**
+	 * Every verdict this task has been rejected with, oldest first.
+	 *
+	 * Kept in full rather than as the latest one. Three attempts against the same
+	 * prompt plus a single line of "why not" is three re-rolls; a worker that can
+	 * see it already tried and failed a particular way has something to work with.
+	 */
+	rejections?: string[];
+	/**
 	 * Every field on the task that this loop has no opinion about — category,
 	 * tags, created, a project's own per-task flags — kept verbatim so a write
 	 * cannot drop them. Deliberately holds *only* the unmodelled fields: a second
@@ -109,7 +117,16 @@ export const STORE_CANDIDATES = ["TODO.toml", "todo.toml"];
 const LEVELS: TaskLevel[] = ["task", "scope", "epic"];
 
 /** Keys the loop owns. Under a schema with a sidecar, none of them may touch the task file. */
-const BOOKKEEPING = ["attempts", "started_at", "done_at", "summary", "reason", "overflowed", "overflow_reason"];
+const BOOKKEEPING = [
+	"attempts",
+	"started_at",
+	"done_at",
+	"summary",
+	"reason",
+	"overflowed",
+	"overflow_reason",
+	"rejections",
+];
 
 /** Keys `Task` models directly, and which therefore never belong in `extra`. */
 const MODELLED = ["id", "title", "status", "level", "parent", ...BOOKKEEPING];
@@ -257,6 +274,10 @@ function readTask(raw: TomlTable, schema: Schema, archived: boolean): Task | und
 	if (startedAt) task.started_at = startedAt;
 	const doneAt = asString(raw.done_at);
 	if (doneAt) task.done_at = doneAt;
+	if (Array.isArray(raw.rejections)) {
+		const kept = raw.rejections.map((value) => asString(value)).filter(Boolean);
+		if (kept.length) task.rejections = kept;
+	}
 	return task;
 }
 
@@ -282,6 +303,7 @@ function applySidecar(tasks: Task[], sidecar: Sidecar): void {
 		if (state.reason) task.reason = state.reason;
 		if (state.overflowed) task.overflowed = true;
 		if (state.overflow_reason) task.overflow_reason = state.overflow_reason;
+		if (state.rejections?.length) task.rejections = [...state.rejections];
 	}
 }
 
@@ -377,7 +399,17 @@ function taskTable(task: Task, schema: Schema): TomlTable {
 	else setOrDelete(values, "level", task.level && task.level !== "task" ? task.level : undefined);
 
 	if (schema.sidecar) {
-		for (const key of BOOKKEEPING) delete values[key];
+		for (const key of BOOKKEEPING) {
+			if (!schema.sharedFields.includes(key)) delete values[key];
+		}
+		// A shared key is the file's own field, so it is written from the typed
+		// value like any other rather than left to whatever `extra` remembered.
+		// Only while the status it explains is actually set, though: `reason` is
+		// the project's word for "why is this blocked", and a rejection note on a
+		// task the loop is still retrying is the loop's business, not the queue's.
+		if (schema.sharedFields.includes("reason")) {
+			setOrDelete(values, "reason", task.status === "blocked" ? task.reason : undefined);
+		}
 	} else {
 		values.attempts = task.attempts;
 		setOrDelete(values, "started_at", task.started_at);
@@ -386,6 +418,8 @@ function taskTable(task: Task, schema: Schema): TomlTable {
 		setOrDelete(values, "reason", task.reason);
 		setOrDelete(values, "overflowed", task.overflowed ? true : undefined);
 		setOrDelete(values, "overflow_reason", task.overflow_reason);
+		if (task.rejections?.length) values.rejections = [...task.rejections];
+		else delete values.rejections;
 	}
 
 	return ordered(values, schema.fieldOrder);
@@ -417,15 +451,19 @@ export function serializeArchive(store: Store): string | undefined {
 
 export function sidecarOf(store: Store): Sidecar {
 	const sidecar = emptySidecar();
+	const shared = store.schema.sharedFields;
 	sidecar.loop = { ...store.loop };
 	for (const task of store.tasks) {
+		// A field the queue itself stores is not duplicated here; one copy of a
+		// fact is the whole point of putting it in the file that owns it.
 		const state: TaskState = { attempts: task.attempts };
+		if (task.reason && !(shared.includes("reason") && task.status === "blocked")) state.reason = task.reason;
 		if (task.started_at) state.started_at = task.started_at;
 		if (task.done_at) state.done_at = task.done_at;
 		if (task.summary) state.summary = task.summary;
-		if (task.reason) state.reason = task.reason;
 		if (task.overflowed) state.overflowed = true;
 		if (task.overflow_reason) state.overflow_reason = task.overflow_reason;
+		if (task.rejections?.length) state.rejections = [...task.rejections];
 		sidecar.tasks.set(task.id, state);
 	}
 	return sidecar;
@@ -571,14 +609,70 @@ export function workingOrder(store: Store): Task[] {
 }
 
 /**
- * Leftmost incomplete leaf. Interior nodes are never handed to the model —
+ * Ids this task declared it is waiting on. Always a list; absent means none.
+ *
+ * Not a modelled field, because the loop does not create dependencies — it only
+ * refuses to ignore them. A schema without the field simply never has any.
+ */
+export function blockersOf(task: Task): string[] {
+	const declared = task.extra?.blocked_by;
+	if (!Array.isArray(declared)) return [];
+	return declared.map((value) => String(value)).filter(Boolean);
+}
+
+/**
+ * The blockers that have not shipped, in the order they were declared.
+ *
+ * A blocker that is not in the queue at all counts as unmet. Treating an
+ * unknown id as "nothing is in the way" would turn one typo into a silently
+ * disabled guard, and a guard nobody can see fail is not a guard.
+ */
+export function unmetBlockers(task: Task, tasks: Task[]): string[] {
+	return blockersOf(task).filter((id) => {
+		const blocker = tasks.find((other) => other.id === id);
+		return !blocker || blocker.status !== "done";
+	});
+}
+
+/** True when a task can be started: it is a leaf, it is open, and nothing gates it. */
+export function isReady(task: Task, tasks: Task[]): boolean {
+	if (task.status !== "todo" && task.status !== "doing") return false;
+	if (!isLeaf(task, tasks)) return false;
+	return unmetBlockers(task, tasks).length === 0;
+}
+
+/**
+ * Leftmost startable leaf. Interior nodes are never handed to the model —
  * a parent's work is its children, and prompting with one is how a bounded
  * task turns into a forty-turn run.
+ *
+ * A leaf whose `blocked_by` is not satisfied is skipped rather than blocking the
+ * queue behind it, so declaring a dependency reorders work instead of stopping
+ * it. The loop is otherwise perfectly willing to build something correct for a
+ * state the program cannot reach: the verifier is asked whether the diff does
+ * what the task said, which it will, and nobody is asked whether the task was
+ * worth doing yet.
  */
 export function nextLeaf(store: Store): Task | undefined {
-	return workingOrder(store).find(
-		(task) => (task.status === "todo" || task.status === "doing") && isLeaf(task, store.tasks),
-	);
+	return workingOrder(store).find((task) => isReady(task, store.tasks));
+}
+
+/**
+ * Open leaves that are waiting on something, with what they are waiting on.
+ *
+ * The counterpart to nextLeaf: between them they account for every leaf, so a
+ * queue that reports nothing runnable can always say whether that is because it
+ * is finished or because it is stuck.
+ */
+export function blockedLeaves(store: Store): { task: Task; waitingOn: string[] }[] {
+	const out: { task: Task; waitingOn: string[] }[] = [];
+	for (const task of workingOrder(store)) {
+		if (task.status !== "todo" && task.status !== "doing") continue;
+		if (!isLeaf(task, store.tasks)) continue;
+		const waitingOn = unmetBlockers(task, store.tasks);
+		if (waitingOn.length) out.push({ task, waitingOn });
+	}
+	return out;
 }
 
 /**
@@ -759,6 +853,10 @@ export function markBlocked(store: Store, task: Task, reason: string): void {
 
 export function recordFailure(store: Store, task: Task, reason: string): number {
 	task.attempts += 1;
+	// Appended, not replaced: the next attempt should see the whole history, so
+	// it can stop repeating an approach that has already been rejected once.
+	const trimmed = reason.trim();
+	if (trimmed) task.rejections = [...(task.rejections ?? []), trimmed];
 	store.loop.last_failure = reason;
 	return task.attempts;
 }
@@ -785,6 +883,9 @@ export function promoteToScope(store: Store, task: Task, reason: string): void {
 	task.reason = reason;
 	task.summary = undefined;
 	task.done_at = undefined;
+	// The rejections were about implementing it, and it is not going to be
+	// implemented now. Carrying them into a breakdown prompt is noise.
+	task.rejections = undefined;
 	if (store.loop.current === task.id) store.loop.current = "";
 	store.loop.last_failure = "";
 }
@@ -822,8 +923,10 @@ export function renderTree(store: Store, options: TreeOptions = {}): string {
 		const pending = needsBreakdown(task, store.tasks) ? " — needs breaking down" : "";
 		const over = task.overflowed ? " ⚠ too coarse" : "";
 		const shipped = task.archived ? " (archived)" : "";
+		const waiting = task.archived ? [] : unmetBlockers(task, store.tasks);
+		const gated = waiting.length ? ` — waiting on ${waiting.join(", ")}` : "";
 		lines.push(
-			`${indent}${marks[task.status]} ${task.id}${level}: ${task.title}${attempts}${pending}${reason}${over}${shipped}`,
+			`${indent}${marks[task.status]} ${task.id}${level}: ${task.title}${attempts}${pending}${gated}${reason}${over}${shipped}`,
 		);
 	}
 
