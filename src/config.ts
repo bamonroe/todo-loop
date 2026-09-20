@@ -54,6 +54,30 @@ export interface Config {
 		max_evidence_bytes: number;
 		timeout_ms: number;
 	};
+	project: {
+		/**
+		 * pi packages this project's workers load, handed to `pi -e` verbatim
+		 * (paths resolve against the project root, where the worker runs). Empty
+		 * leaves pi's global extension discovery alone; set, the worker gets
+		 * `--no-extensions` plus one `-e` per entry, so it carries exactly this
+		 * project's tools and nobody else's.
+		 *
+		 * Measured before adding this: four Android tool definitions cost ~670
+		 * tokens, 1.2% of a 56,320-token window. The key does not exist to save
+		 * context — it exists so todoloop.toml is the one place that says what a
+		 * project *is*: its packages, its commands, its lifecycle.
+		 */
+		packages: string[];
+		/**
+		 * Run by the driver before the first task; a non-zero exit stops the run
+		 * before any task starts. For infrastructure a worker should find already
+		 * present — an emulator booted, a container warmed — instead of spending
+		 * a session assembling it. The model never sees this command.
+		 */
+		setup_command: string;
+		/** Run when the loop exits, success or not; its exit code is ignored. */
+		teardown_command: string;
+	};
 	loop: {
 		max_iterations: number;
 		/**
@@ -231,6 +255,11 @@ export const DEFAULT_CONFIG: Config = {
 		max_evidence_bytes: 12000,
 		timeout_ms: 300000,
 	},
+	project: {
+		packages: [],
+		setup_command: "",
+		teardown_command: "",
+	},
 	loop: {
 		max_iterations: 50,
 		worker_timeout_ms: 0,
@@ -293,6 +322,12 @@ function pickBool(table: Plain, key: string, fallback: boolean): boolean {
 	return typeof value === "boolean" ? value : fallback;
 }
 
+function pickStringArray(table: Plain, key: string, fallback: string[]): string[] {
+	const value = table[key];
+	if (!Array.isArray(value)) return fallback;
+	return value.filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "");
+}
+
 function section(doc: Plain, name: string): Plain {
 	const value = doc[name];
 	return value && typeof value === "object" && !Array.isArray(value) ? (value as Plain) : {};
@@ -307,6 +342,7 @@ export function parseConfig(text: string): Config {
 	const atomic = section(doc, "atomic");
 	const context = section(doc, "context");
 	const ollama = section(doc, "ollama");
+	const project = section(doc, "project");
 
 	const workerTimeout = Math.max(0, pickNumber(loop, "worker_timeout_ms", DEFAULT_CONFIG.loop.worker_timeout_ms));
 	// `decompose_timeout_ms` was this key's name while the levels were a ladder.
@@ -343,6 +379,11 @@ export function parseConfig(text: string): Config {
 			require_tests_pass: pickBool(verify, "require_tests_pass", DEFAULT_CONFIG.verify.require_tests_pass),
 			max_evidence_bytes: pickNumber(verify, "max_evidence_bytes", DEFAULT_CONFIG.verify.max_evidence_bytes),
 			timeout_ms: pickNumber(verify, "timeout_ms", DEFAULT_CONFIG.verify.timeout_ms),
+		},
+		project: {
+			packages: pickStringArray(project, "packages", DEFAULT_CONFIG.project.packages),
+			setup_command: pickString(project, "setup_command", DEFAULT_CONFIG.project.setup_command),
+			teardown_command: pickString(project, "teardown_command", DEFAULT_CONFIG.project.teardown_command),
 		},
 		loop: {
 			max_iterations: pickNumber(loop, "max_iterations", DEFAULT_CONFIG.loop.max_iterations),

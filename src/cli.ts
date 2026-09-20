@@ -19,7 +19,7 @@ import {
 	type Config,
 } from "./config.ts";
 import { diagnose, formatChecks } from "./doctor.ts";
-import { commitAll, gatherEvidence, headCommit, isGitRepo, isTreeClean, loopOwnedPaths, revertTo } from "./evidence.ts";
+import { commitAll, gatherEvidence, headCommit, isGitRepo, isTreeClean, loopOwnedPaths, revertTo, runCommand } from "./evidence.ts";
 import { renderAssignmentPrompt } from "./prompt.ts";
 import { checkPlanRound, type PlanVerdict } from "./plan.ts";
 import {
@@ -556,13 +556,19 @@ interface PiRun {
  * checkpoint and verify config had not already conceded.
  */
 export function workerArgs(config: Config, prompt: string): { args: string[]; model: string } {
+	// [project].packages replaces pi's global extension discovery with exactly
+	// this project's tools: --no-extensions turns discovery off, and explicit -e
+	// paths still load. Order matters to nobody but the reader; the flags go
+	// before "--" because everything after it is the prompt.
+	const packages = config.project.packages.flatMap((entry) => ["-e", entry]);
+	const isolation = packages.length ? ["--no-extensions", ...packages] : [];
 	// pi reads a trailing `:suffix` on --model as a thinking level, so an ollama
 	// tag like `qwen3.8-27b:52k` cannot round-trip through the flag. Inheriting
 	// pi's own default is the way out when that bites.
-	if (inheritsWorker(config)) return { args: ["-p", "--approve", "--", prompt], model: "inherited from pi" };
+	if (inheritsWorker(config)) return { args: ["-p", "--approve", ...isolation, "--", prompt], model: "inherited from pi" };
 	const { provider, model } = splitModelRef(config.models.worker);
 	return {
-		args: ["-p", "--approve", "--provider", provider, "--model", model, "--", prompt],
+		args: ["-p", "--approve", "--provider", provider, "--model", model, ...isolation, "--", prompt],
 		model: `${provider}/${model}`,
 	};
 }
@@ -632,10 +638,44 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 		if (!dryRun) env.store = loadStore(env.storeFile);
 	};
 
+	// [project].setup_command: infrastructure the workers should find already
+	// present — an emulator booted, a container warmed — paid for once here
+	// instead of once per session by a model that cannot afford it. Failing to
+	// set up is failing the run: every task after it would inherit the gap.
+	if (!dryRun && env.config.project.setup_command) {
+		const setup = await runCommand(env.cwd, env.config.project.setup_command, 0, 16 * 1024);
+		if (!setup.ok) {
+			console.error(`setup_command failed (exit ${setup.code}):\n${setup.output}`);
+			return EXIT_ERROR;
+		}
+		console.log(`[todo-loop] setup: ${env.config.project.setup_command}`);
+	}
+
 	env.store.loop.running = true;
 	env.store.loop.iterations = 0;
 	persist();
 
+	try {
+		return await runLoop(env, flags, dryRun, maxIterations, persist, refresh);
+	} finally {
+		// Teardown runs on every exit — clean, error, or thrown — and its own
+		// failure is only reported. The kill-the-driver habit means orphaned
+		// infrastructure is the common case, not the odd one.
+		if (!dryRun && env.config.project.teardown_command) {
+			const teardown = await runCommand(env.cwd, env.config.project.teardown_command, 0, 16 * 1024);
+			if (!teardown.ok) console.error(`teardown_command failed (exit ${teardown.code}), continuing:\n${teardown.output}`);
+		}
+	}
+}
+
+async function runLoop(
+	env: Env,
+	flags: Flags,
+	dryRun: boolean,
+	maxIterations: number,
+	persist: () => void,
+	refresh: () => void,
+): Promise<number> {
 	for (let iteration = 1; iteration <= maxIterations; iteration++) {
 		refresh();
 		if (!env.store.loop.running) {

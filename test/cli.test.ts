@@ -277,3 +277,26 @@ test("a round cut off before writing anything never closes its plan", async () =
 	assert.notEqual(plan?.status, "done", "a stopwatch must not finish a branch");
 	assert.equal(plan?.attempts, 1, "it is a failed round, and counted as one");
 });
+
+test("project packages isolate the worker's extensions", () => {
+	const config = parseConfig('[project]\npackages = ["../pi/android", "./local-ext"]\n');
+	const { args } = workerArgs(config, "prompt");
+	// Discovery off, explicit paths in, and all of it before the prompt separator.
+	const separator = args.indexOf("--");
+	assert.ok(args.indexOf("--no-extensions") > -1 && args.indexOf("--no-extensions") < separator);
+	assert.deepEqual(
+		args.filter((_, i) => args[i - 1] === "-e"),
+		["../pi/android", "./local-ext"],
+	);
+
+	// No packages: pi's global discovery is left entirely alone.
+	const bare = workerArgs(parseConfig(""), "prompt");
+	assert.ok(!bare.args.includes("--no-extensions"));
+	assert.ok(!bare.args.includes("-e"));
+});
+
+test("the project section parses and filters junk", () => {
+	const config = parseConfig('[project]\npackages = ["a", 3, ""]\nsetup_command = "boot-emulator"\nteardown_command = "kill-emulator"\n');
+	assert.deepEqual(config.project, { packages: ["a"], setup_command: "boot-emulator", teardown_command: "kill-emulator" });
+	assert.deepEqual(parseConfig("").project, { packages: [], setup_command: "", teardown_command: "" });
+});
