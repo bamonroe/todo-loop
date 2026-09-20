@@ -25,6 +25,7 @@ before(async () => {
 	git("init", "-q");
 	git("config", "user.email", "test@example.com");
 	git("config", "user.name", "Test");
+	fs.writeFileSync(path.join(repo, "todo.toml"), "[loop]\nrunning = false\n");
 	fs.writeFileSync(path.join(repo, "server.ts"), "export const port = 3000;\n");
 	git("add", "-A");
 	git("commit", "-qm", "initial");
@@ -202,4 +203,25 @@ test("loopOwnedPaths lists the queue relative to the repo, and nothing outside i
 		"todo.toml",
 		"todoloop.toml",
 	]);
+});
+
+test("a single excluded modification still reads as clean", async () => {
+	// The loop writes its own queue file before it checks the tree, so this is
+	// the ordinary path, not an edge case. Porcelain reports an unstaged edit as
+	// " M path" with a blank first status column: trimming the whole output
+	// instead of each line shifts that path two characters and the exclusion
+	// silently stops matching.
+	await commitAll(repo, "seed the queue file");
+	fs.appendFileSync(path.join(repo, "todo.toml"), "\nrunning = true\n");
+
+	assert.equal(await isTreeClean(repo), false);
+	assert.equal(await isTreeClean(repo, ["todo.toml"]), true);
+});
+
+test("an excluded file first in the list does not cover an unexcluded one after it", async () => {
+	fs.writeFileSync(path.join(repo, "src.ts"), "export const real = 1;\n");
+	assert.equal(await isTreeClean(repo, ["todo.toml"]), false);
+	assert.equal(await isTreeClean(repo, ["todo.toml", "src.ts"]), true);
+	fs.rmSync(path.join(repo, "src.ts"));
+	git("checkout", "--", "todo.toml");
 });

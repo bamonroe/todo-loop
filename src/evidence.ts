@@ -100,11 +100,16 @@ export async function headCommit(cwd: string): Promise<string> {
  * anything — pass nothing.
  */
 export async function isTreeClean(cwd: string, ignore: string[] = []): Promise<boolean> {
-	const status = (await git(cwd, ["status", "--porcelain"])).trim();
-	if (!status) return true;
+	// Split before trimming, never after. A porcelain line is "XY path", and an
+	// unstaged edit leaves X blank — so trimming the whole output eats the first
+	// line's leading space, shifts its path two characters left, and the entry
+	// matches nothing in `ignore`. With one modified file, which is the usual
+	// case, that silently defeats every exclusion the caller passed.
+	const lines = (await git(cwd, ["status", "--porcelain"])).split("\n").filter((line) => line.trim());
+	if (!lines.length) return true;
 	if (!ignore.length) return false;
 	const ignored = new Set(ignore);
-	return status.split("\n").every((line) => ignored.has(statusPath(line)));
+	return lines.every((line) => ignored.has(statusPath(line)));
 }
 
 /** The path a --porcelain line refers to; a rename reports "old -> new". */
