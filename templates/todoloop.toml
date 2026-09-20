@@ -99,3 +99,29 @@ tool_output_max_bytes = 2048
 
 [ollama]
 base_url = "http://localhost:11434/v1"
+# Sampling for a *local* verifier, sent on the wire.
+#
+# In a pi session the verifier goes through pi's model registry, which applies
+# whatever ~/.pi/agent/models.json says. `todo complete` from the command line
+# has no session and no registry, so it talks to the server directly and none of
+# that tuning applies. These values are that tuning, stated where the CLI path
+# can see it. If you tune the model in models.json, mirror it here.
+#
+# The defaults are Qwen's thinking-mode recommendation. Temperature 0 looks
+# right for a judge and is wrong here: it is what makes Qwen's thinking mode
+# loop. `presence_penalty` is the only repetition control ollama's OpenAI
+# compatibility layer forwards — top_k, min_p and repeat_penalty are dropped.
+temperature = 0.6
+top_p = 0.95
+presence_penalty = 0.5
+# Thinking budget for the verdict. Supply nothing and Qwen's chat template falls
+# back to xhigh, which prepends an instruction to second-guess itself: measured
+# at 38 extra prompt tokens and ~4x the completion tokens, for the same verdicts.
+# "does this diff match this task" is not a question that needs deliberation.
+#
+# high | medium | low | none. "max" and "xhigh" make the template raise a 500 and
+# are dropped rather than sent.
+reasoning_effort = "low"
+# Cap on the local reply. Unbounded is not free on a reasoning model: a verdict
+# that never stops thinking blocks the loop, which is worse than a bill.
+max_tokens = 2048

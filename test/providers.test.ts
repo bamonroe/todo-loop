@@ -4,11 +4,14 @@ import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { DEFAULT_CONFIG, type Config } from "../src/config.ts";
+import { DEFAULT_CONFIG, parseConfig, type Config } from "../src/config.ts";
 import { completerFor, endpointFor, piAuthKey, resolveApiKey } from "../src/providers.ts";
 import { chatCompleter, verify } from "../src/verify.ts";
 
-const config: Config = { ...DEFAULT_CONFIG, ollama: { base_url: "http://localhost:11434/v1" } };
+const config: Config = {
+	...DEFAULT_CONFIG,
+	ollama: { ...DEFAULT_CONFIG.ollama, base_url: "http://localhost:11434/v1" },
+};
 
 const task = { id: "a.one", title: "Add a health endpoint" };
 const evidence = { diff: "+ app.get('/health')", files: ["server.ts"], dirty: false, commands: [] };
@@ -37,8 +40,9 @@ test("an ollama reference stays on the local server and needs no key", () => {
 	assert.equal(endpoint.model, "qwen3.5:9b");
 	assert.equal(endpoint.baseUrl, "http://localhost:11434/v1");
 	assert.equal(endpoint.problem, undefined);
-	// No cap locally: an over-thinking model costs time, not money.
-	assert.equal(endpoint.maxTokens, undefined);
+	// Capped even locally. An over-thinking model costs time rather than money,
+	// but a verdict that never arrives blocks the queue, which is worse.
+	assert.equal(endpoint.maxTokens, DEFAULT_CONFIG.ollama.max_tokens);
 });
 
 test("a bare model id is still read as ollama", () => {
@@ -180,3 +184,48 @@ function stubEndpoint(
 		close: () => new Promise<void>((resolve) => server.close(() => resolve())),
 	};
 }
+
+test("a local verifier is tuned on the wire, because no pi registry tunes it here", async () => {
+	const seen: { body?: Record<string, unknown> } = {};
+	const server = stubEndpoint(seen, { choices: [{ message: { content: '{"pass": true, "reason": "ok"}' } }] });
+	const local: Config = { ...config, ollama: { ...config.ollama, base_url: await server.url } };
+
+	await completerFor("ollama/qwen3.8-27b:default", local)({ system: "s", user: "u" });
+
+	// Temperature 0 is the shipped default and the wrong one locally: it is what
+	// sends Qwen's thinking mode into a loop.
+	assert.equal(seen.body?.temperature, 0.6);
+	assert.equal(seen.body?.top_p, 0.95);
+	assert.equal(seen.body?.presence_penalty, 0.5);
+	// Unsupplied, the chat template falls back to xhigh and pays for deliberation
+	// this decision does not need.
+	assert.equal(seen.body?.reasoning_effort, "low");
+	// A local reply is not free: an uncapped reasoning model blocks the loop.
+	assert.equal(seen.body?.max_tokens, 2048);
+	await server.close();
+});
+
+test("a hosted verifier still judges at temperature 0", async () => {
+	const seen: { body?: Record<string, unknown> } = {};
+	const server = stubEndpoint(seen, { choices: [{ message: { content: '{"pass": true, "reason": "ok"}' } }] });
+	await chatCompleter({ baseUrl: await server.url, model: "m", apiKey: "k" })({ system: "s", user: "u" });
+	assert.equal(seen.body?.temperature, 0);
+	assert.equal(seen.body?.reasoning_effort, undefined);
+	await server.close();
+});
+
+test("an effort the chat template raises on is dropped rather than sent", () => {
+	for (const effort of ["max", "xhigh"]) {
+		const parsed = parseConfig(`[ollama]\nreasoning_effort = "${effort}"\n`);
+		assert.equal(parsed.ollama.reasoning_effort, "");
+		const endpoint = endpointFor("ollama/m", parsed);
+		assert.equal("reasoning_effort" in (endpoint.params ?? {}), false);
+	}
+});
+
+test("local sampling is configurable, since the right values follow the model", () => {
+	const parsed = parseConfig(`[ollama]\ntemperature = 0.2\nmax_tokens = 512\nreasoning_effort = "none"\n`);
+	assert.equal(parsed.ollama.temperature, 0.2);
+	assert.equal(parsed.ollama.max_tokens, 512);
+	assert.equal(endpointFor("ollama/m", parsed).params?.reasoning_effort, "none");
+});

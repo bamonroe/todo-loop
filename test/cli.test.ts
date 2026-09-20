@@ -5,6 +5,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { after, before, test } from "node:test";
 import { promisify } from "node:util";
+import { workerArgs } from "../src/cli.ts";
+import { DEFAULT_CONFIG, parseConfig } from "../src/config.ts";
 import { loadStore } from "../src/store.ts";
 
 const run = promisify(execFile);
@@ -163,4 +165,25 @@ test("stop halts the loop between tasks", async () => {
 	fs.writeFileSync(store, fs.readFileSync(store, "utf8").replace("running = false", "running = true"));
 	assert.equal((await todo("stop")).code, 0);
 	assert.equal(loadStore(store).loop.running, false);
+});
+
+test("the worker is launched with project-local files trusted", () => {
+	// Without --approve, pi falls back to defaultProjectTrust and *silently*
+	// skips the project's own .pi/settings.json. On a small local window that
+	// file is what keeps compaction from retaining more than its own trigger
+	// threshold, so losing it is a loop that compacts forever.
+	const inherited = workerArgs({ ...DEFAULT_CONFIG, models: { ...DEFAULT_CONFIG.models, worker: "inherit" } }, "p");
+	assert.ok(inherited.args.includes("--approve"));
+	assert.deepEqual(inherited.args, ["-p", "--approve", "--", "p"]);
+
+	const pinned = workerArgs(parseConfig('[models]\nworker = "ollama/qwen3.8-27b"\n'), "p");
+	assert.deepEqual(pinned.args, ["-p", "--approve", "--provider", "ollama", "--model", "qwen3.8-27b", "--", "p"]);
+	assert.equal(pinned.model, "ollama/qwen3.8-27b");
+});
+
+test("the prompt stays behind the -- separator, whatever it starts with", () => {
+	// A prompt beginning with a dash must never be read as a flag.
+	const { args } = workerArgs(DEFAULT_CONFIG, "--version");
+	assert.equal(args[args.length - 1], "--version");
+	assert.equal(args[args.length - 2], "--");
 });

@@ -93,6 +93,44 @@ export interface Config {
 	};
 	ollama: {
 		base_url: string;
+		/**
+		 * Sampling for the local verifier, sent on the wire.
+		 *
+		 * This is here because a local verifier does *not* go through pi: in a
+		 * session the extension calls it through pi's model registry, which
+		 * applies `~/.pi/agent/models.json`, but `todo complete` from the command
+		 * line has no session and no registry, so it talks to the server itself.
+		 * Whatever tuning models.json carries is invisible on that path, and the
+		 * two paths would otherwise disagree about the same model.
+		 *
+		 * The defaults are Qwen's own thinking-mode recommendation. Temperature 0
+		 * is the trap worth naming: it looks right for a judge and is what makes
+		 * Qwen's thinking mode loop. Hosted verifiers keep temperature 0, where
+		 * determinism is free and no local template is involved.
+		 */
+		temperature: number;
+		top_p: number;
+		/** The one repetition control ollama's OpenAI layer actually forwards. */
+		presence_penalty: number;
+		/**
+		 * Thinking budget for the local verifier.
+		 *
+		 * Qwen's chat template falls back to `xhigh` when nothing is supplied,
+		 * which prepends an instruction to second-guess itself — measured at 38
+		 * extra prompt tokens and roughly four times the completion tokens, for
+		 * the same verdicts, on a decision this narrow. "Does this diff match
+		 * this task" does not need a deliberation budget.
+		 *
+		 * Accepted: high | medium | low | none. `max` and `xhigh` make the
+		 * template raise (HTTP 500) and must never be sent; "" omits the field.
+		 */
+		reasoning_effort: string;
+		/**
+		 * Cap on the local reply. Unbounded is not free on a reasoning model: a
+		 * verdict that never stops thinking blocks the loop rather than costing
+		 * money, which is the worse failure of the two.
+		 */
+		max_tokens: number;
 	};
 }
 
@@ -131,12 +169,25 @@ export const DEFAULT_CONFIG: Config = {
 	},
 	ollama: {
 		base_url: "http://localhost:11434/v1",
+		temperature: 0.6,
+		top_p: 0.95,
+		presence_penalty: 0.5,
+		reasoning_effort: "low",
+		max_tokens: 2048,
 	},
 };
 
 export const DEFAULT_CONFIG_FILE = "todoloop.toml";
 
 type Plain = Record<string, unknown>;
+
+/**
+ * Thinking levels Qwen's chat template raises on rather than clamping. Sending
+ * either returns HTTP 500, which would fail every verification closed — a
+ * blocked queue caused by a config typo, with the real reason buried in a
+ * provider error string.
+ */
+const REFUSED_EFFORTS = new Set(["max", "xhigh"]);
 
 function pickString(table: Plain, key: string, fallback: string): string {
 	const value = table[key];
@@ -175,6 +226,7 @@ export function parseConfig(text: string): Config {
 			: DEFAULT_CONFIG.loop.checkpoint;
 	const silentRaw = pickString(loop, "on_silent_stop", DEFAULT_CONFIG.loop.on_silent_stop);
 	const on_silent_stop = silentRaw === "retry" ? "retry" : "halt";
+	const effortRaw = pickString(ollama, "reasoning_effort", DEFAULT_CONFIG.ollama.reasoning_effort).trim();
 	const overflowRaw = pickString(atomic, "on_overflow", DEFAULT_CONFIG.atomic.on_overflow);
 	const on_overflow =
 		overflowRaw === "promote" || overflowRaw === "off" || overflowRaw === "warn"
@@ -220,6 +272,13 @@ export function parseConfig(text: string): Config {
 		},
 		ollama: {
 			base_url: pickString(ollama, "base_url", DEFAULT_CONFIG.ollama.base_url),
+			temperature: pickNumber(ollama, "temperature", DEFAULT_CONFIG.ollama.temperature),
+			top_p: pickNumber(ollama, "top_p", DEFAULT_CONFIG.ollama.top_p),
+			presence_penalty: pickNumber(ollama, "presence_penalty", DEFAULT_CONFIG.ollama.presence_penalty),
+			// Two values the template raises on. Silently dropping them beats a
+			// 500 on every verify call from a typo in a config file.
+			reasoning_effort: REFUSED_EFFORTS.has(effortRaw) ? "" : effortRaw,
+			max_tokens: pickNumber(ollama, "max_tokens", DEFAULT_CONFIG.ollama.max_tokens),
 		},
 	};
 }

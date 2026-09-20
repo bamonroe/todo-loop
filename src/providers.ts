@@ -24,6 +24,8 @@ export interface Endpoint {
 	apiKey: string;
 	headers?: Record<string, string>;
 	maxTokens?: number;
+	/** Extra top-level request fields: sampling, and reasoning effort where honoured. */
+	params?: Record<string, unknown>;
 	/** True when the request leaves this machine. */
 	remote: boolean;
 	/** Set when the endpoint cannot be used as configured; the reason is user-facing. */
@@ -119,11 +121,23 @@ export function endpointFor(ref: string, config: Config): Endpoint {
 	const { provider, model } = splitModelRef(ref);
 
 	if (provider === "ollama") {
+		const { temperature, top_p, presence_penalty, reasoning_effort, max_tokens } = config.ollama;
 		return {
 			provider,
 			model,
 			baseUrl: config.ollama.base_url,
 			apiKey: "ollama",
+			maxTokens: max_tokens,
+			// In a pi session the extension reaches a local verifier through pi's
+			// model registry, which applies ~/.pi/agent/models.json. From the CLI
+			// there is no registry, so the tuning that file carries has to be
+			// stated here or this path silently runs untuned. Keep the two in step.
+			params: {
+				temperature,
+				top_p,
+				presence_penalty,
+				...(reasoning_effort ? { reasoning_effort } : {}),
+			},
 			remote: false,
 		};
 	}
@@ -177,6 +191,7 @@ export function completerFor(ref: string, config: Config, signal?: AbortSignal):
 		apiKey: endpoint.apiKey,
 		headers: endpoint.headers,
 		maxTokens: endpoint.maxTokens,
+		params: endpoint.params,
 		signal,
 	});
 }

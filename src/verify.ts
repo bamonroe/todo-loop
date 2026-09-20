@@ -110,6 +110,13 @@ export interface ChatEndpoint {
 	 * model the thinking tokens come out of the same budget as the verdict.
 	 */
 	maxTokens?: number;
+	/**
+	 * Extra top-level request fields — sampling, and `reasoning_effort` where the
+	 * server honours it. Merged over the defaults below, so a caller that sets
+	 * nothing still gets the deterministic judging temperature that suits a
+	 * hosted model.
+	 */
+	params?: Record<string, unknown>;
 	signal?: AbortSignal;
 }
 
@@ -118,8 +125,12 @@ export function chatCompleter(endpoint: ChatEndpoint): Completer {
 	return async ({ system, user }) => {
 		const body: Record<string, unknown> = {
 			model: endpoint.model,
+			// Right for a hosted judge, and overridden for a local one: on a local
+			// reasoning model temperature 0 is what sends thinking mode into a
+			// loop. See the ollama section of src/config.ts.
 			temperature: 0,
 			stream: false,
+			...endpoint.params,
 			messages: [
 				{ role: "system", content: system },
 				{ role: "user", content: user },

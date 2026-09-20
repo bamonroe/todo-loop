@@ -23,7 +23,10 @@ for ((i = 1; i <= max; i++)); do
 	"$todo" start >/dev/null
 
 	# stdin from /dev/null: print mode waits for EOF before it runs the prompt.
-	pi -p -- "$prompt" </dev/null || echo "pi exited non-zero; verifying anyway" >&2
+	# --approve: print mode never asks about project trust, and without the flag
+	# it silently skips the project's own .pi/settings.json. See workerArgs in
+	# src/cli.ts for why that file matters on a small context window.
+	pi -p --approve -- "$prompt" </dev/null || echo "pi exited non-zero; verifying anyway" >&2
 
 	if "$todo" complete "$id"; then
 		continue

@@ -501,15 +501,29 @@ interface PiRun {
  *
  * The label exists so a dry run says which model the real run would pick.
  * Getting that wrong is otherwise invisible until the tokens are spent.
+ *
+ * `--approve` is what makes the project's own `.pi/settings.json` load at all.
+ * pi only asks about project trust interactively, and print mode never asks, so
+ * without the flag it falls back to `defaultProjectTrust` — `ask` by default,
+ * which *silently* skips the file. That matters most for a small local window,
+ * where `reserveTokens` and `keepRecentTokens` have to be resized or compaction
+ * can retain more than its own trigger threshold and fire forever. pi parses
+ * the file either way and will warn about bad JSON in it, so a clean start is
+ * not evidence the settings applied. Verified on pi 0.85.1: `pi -p` reported
+ * the global thinking level, `pi -p --approve` the project's.
+ *
+ * The trust this grants is project-local files in a repo the loop is already
+ * running the test and build commands from, so it widens nothing that the
+ * checkpoint and verify config had not already conceded.
  */
 export function workerArgs(config: Config, prompt: string): { args: string[]; model: string } {
 	// pi reads a trailing `:suffix` on --model as a thinking level, so an ollama
 	// tag like `qwen3.8-27b:52k` cannot round-trip through the flag. Inheriting
 	// pi's own default is the way out when that bites.
-	if (inheritsWorker(config)) return { args: ["-p", "--", prompt], model: "inherited from pi" };
+	if (inheritsWorker(config)) return { args: ["-p", "--approve", "--", prompt], model: "inherited from pi" };
 	const { provider, model } = splitModelRef(config.models.worker);
 	return {
-		args: ["-p", "--provider", provider, "--model", model, "--", prompt],
+		args: ["-p", "--approve", "--provider", provider, "--model", model, "--", prompt],
 		model: `${provider}/${model}`,
 	};
 }
