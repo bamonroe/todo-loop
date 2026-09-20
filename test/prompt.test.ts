@@ -160,11 +160,11 @@ test("the progress rule names the research allowance it has left", () => {
 
 test("deferring is offered as the default, and withdrawn at the nesting cap", () => {
 	const prompt = renderAssignmentPrompt(plan, plan.tasks[0], PLAN_OPTS);
-	assert.match(prompt, /Prefer `plan` whenever naming the files would mean deciding a design first/);
+	assert.match(prompt, /Add an `act` only where you can already name the files without settling anything first/);
 
 	const capped = renderAssignmentPrompt(plan, plan.tasks[0], { ...PLAN_OPTS, maxDepth: 1 });
 	assert.match(capped, /at the nesting cap, so this round may add acts only/);
-	assert.doesNotMatch(capped, /Prefer `plan` whenever/);
+	assert.doesNotMatch(capped, /`plan` is the default/);
 });
 
 test("items are written as they are decided, not planned in one block", () => {
@@ -173,7 +173,19 @@ test("items are written as they are decided, not planned in one block", () => {
 	// cut off. Everything worked out in those blocks died with the session.
 	const prompt = renderAssignmentPrompt(plan, plan.tasks[0], PLAN_OPTS);
 	assert.match(prompt, /Add each item the moment you decide it/);
-	assert.match(prompt, /Keep the deliberation per item short/);
+	assert.match(prompt, /On the record beats exactly right/);
+	// Run 7 re-derived the same five items in three thinking blocks, flipping its
+	// serialization choice between them, and got one item written before the clock
+	// took it. Weighing an item is the signal to defer it, not to think harder.
+	assert.match(prompt, /stop there and make it a `plan`/);
+});
+
+test("planning defers by default, with one act as the floor", () => {
+	const prompt = renderAssignmentPrompt(plan, plan.tasks[0], PLAN_OPTS);
+	assert.match(prompt, /\*\*`plan` is the default\.\*\*/);
+	assert.match(prompt, /One act is still required each round\. That is a floor, not a target/);
+	// A thin detail is a plan, not an act to deliberate into shape.
+	assert.match(prompt, /write it in one pass/);
 });
 
 test("the standalone planning prompt gives the CLI form instead of the tool", () => {

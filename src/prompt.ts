@@ -195,7 +195,9 @@ export function renderPlanPrompt(store: Store, task: Task, options: PromptOption
 			`   You have about ${lookBudget} commands for this, and the harness will say so when they are gone. **Anything you cannot settle in them is not a question to keep digging at — it is a research act.** Write it down in one line and move on. Finding out is work; it belongs in the queue like any other work, where it gets its own session and is read by every round after it. A round that spends itself looking and writes nothing has produced nothing.`,
 			"2. **Then write them down, one at a time.** Add each item the moment you decide it. Do not work them all out first: planning the whole batch before writing anything means holding every item in your head at once and re-deciding earlier ones as later ones change, and if this session ends early everything you worked out is lost while a written item is already safe.",
 			"",
-			"Keep the deliberation per item short. If deciding one takes long, that is the signal it should be a plan, not that it needs more thought here.",
+			"**On the record beats exactly right.** A one-line item that exists is worth more than the same item worked out perfectly and never written, and far more than the third pass over one you already settled. Nothing decided here is final: the next round reads these items with their results beside them and can correct any of it.",
+			"",
+			"So if you catch yourself weighing an item — arguing both sides, choosing between two designs, returning to one you already decided — stop there and make it a `plan`. That feeling is the signal, and `plan` is its answer every time. Deliberation is the most expensive thing this session can spend and the first thing lost if it ends early.",
 			"",
 			"Write no code. Change no files. The round is rejected automatically if the working tree changes — a plan produces queue entries, nothing else.",
 		].join("\n"),
@@ -212,7 +214,7 @@ export function renderPlanPrompt(store: Store, task: Task, options: PromptOption
 				: "  - `research` — finds something out and writes down what it learned.",
 			atDepthCap
 				? "\nYou are at the nesting cap, so this round may add acts only. Anything that feels too big has to be cut into acts you can name the files for."
-				: "- `plan` — anything you cannot yet name the files for. It gets its own session later, which decides it with the earlier work already written and readable.\n\nPrefer `plan` whenever naming the files would mean deciding a design first. Deferring is not an admission that you could not work it out — a design decided now, against a repository that does not contain the earlier steps' code yet, is a guess, and a guess written into an act's detail is the only context its worker will ever have. The same decision made two rounds from now is made by someone who can read that code.",
+				: "- `plan` — anything you cannot yet name the files for. It gets its own session later, which decides it with the earlier work already written and readable.\n\n**`plan` is the default.** Add an `act` only where you can already name the files without settling anything first; everything else is a `plan`, and you do not need to justify that to yourself. Deferring is not an admission that you could not work it out — a design decided now, against a repository that does not contain the earlier steps' code yet, is a guess, and a guess written into an act's detail is the only context its worker will ever have. The same decision made two rounds from now is made by someone who can read that code.\n\nOne act is still required each round. That is a floor, not a target: it is usually the one thing you could already have started before this round began.",
 			"",
 			"Order matters: add them in the order they should be worked. Later items may depend on earlier ones, never the reverse.",
 		].join("\n"),
@@ -226,7 +228,7 @@ export function renderPlanPrompt(store: Store, task: Task, options: PromptOption
 			? [
 					"## How to add them",
 					"Call `todo_add` once per item — `title`, `detail`, `level` (`act` or `plan`), and `kind` for an act. The parent is set for you.",
-					"Put everything the worker will need in `detail`. It is the only context that item will ever have.",
+					"Put what the worker will need in `detail` — it is the only context that item will ever have. But write it in one pass. If you cannot fill it in without working the design out first, that is a `plan`, not an act you deliberate into shape.",
 					"",
 					"## Finishing",
 					"When this round's items are written, call `todo_complete` with a one-line summary of what you decided and why.",
@@ -243,7 +245,7 @@ export function renderPlanPrompt(store: Store, task: Task, options: PromptOption
 					`todo add <id> "<title>" --parent ${task.id} --level <act|plan> --kind <code|docs|research> --detail "<everything the worker needs>"`,
 					"```",
 					"",
-					"Put everything the worker will need in `--detail`. It is the only context that item will ever have.",
+					"Put what the worker will need in `--detail` — it is the only context that item will ever have. But write it in one pass. If you cannot fill it in without working the design out first, that is a `plan`, not an act you deliberate into shape.",
 					"",
 					"## Finishing",
 					"When this round's items are written, stop. Your final message must be a one-line summary of what you decided and why.",
