@@ -168,6 +168,24 @@ async function verifyTask(env: Env, task: Task, signal?: AbortSignal): Promise<V
 }
 
 /**
+ * The verdict for a planning round that ran out of clock.
+ *
+ * Accepted only if it actually wrote something that passes the ordinary check.
+ * Two cases need care. A round that added nothing must not be read as the
+ * planner saying "no next step" — that is what `finished` means, and letting a
+ * timeout close a branch would end the project on a stopwatch. And a round that
+ * added items but broke a rule is still a rejection, so its half-batch is
+ * discarded exactly as before.
+ */
+async function timedOutRound(env: Env, task: Task, budgetMs: number): Promise<PlanVerdict> {
+	const overran = `Worker exceeded its ${budgetMs}ms budget.`;
+	const verdict = (await verifyTask(env, task)) as PlanVerdict;
+	if (!verdict.pass) return { ...verdict, reason: `${verdict.reason} (${overran})` };
+	if (verdict.finished) return { pass: false, mechanical: true, reason: `${overran} The round added nothing.` };
+	return { ...verdict, reason: `${verdict.reason} Cut short by the ${budgetMs}ms budget, so the next round continues it.` };
+}
+
+/**
  * Flag a leaf that touched more files than its budget.
  *
  * Deliberately not a failure. The work may be entirely correct, and rejecting
@@ -680,53 +698,73 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 			return EXIT_ERROR;
 		}
 
-		// A cut-off session is judged on the clock, not on its diff. Sending
+		// A cut-off *act* is judged on the clock, not on its diff. Sending
 		// half-finished work to the verifier wastes a verification to be told what
 		// we already know, and a lucky pass would commit it.
-		const verdict = result.timedOut
-			? { pass: false, reason: `Worker exceeded its ${budgetMs}ms budget.` }
-			: dryRun
-				? { pass: true, reason: "dry run", finished: true }
-				: await verifyTask(env, current);
+		//
+		// A cut-off *planning round* is judged on what it landed. Its check is
+		// mechanical — no model, nothing leaving the machine — and under
+		// re-entrancy a short round is not a broken one: the plan is asked again
+		// with what landed in front of it, which is the whole design. Discarding
+		// three well-ordered items to retry from zero under identical conditions
+		// is how run 5 turned a productive round into a failed one.
+		const verdict = dryRun
+			? { pass: true, reason: "dry run", finished: true }
+			: !result.timedOut
+				? await verifyTask(env, current)
+				: planning
+					? await timedOutRound(env, current, budgetMs)
+					: { pass: false, reason: `Worker exceeded its ${budgetMs}ms budget.` };
+		// A planning round's check reloads the store to see the rows the worker
+		// wrote, so anything held across that call now points at a discarded copy
+		// of the queue. Re-find before mutating: every write from here down —
+		// status, attempts, the research balance, the failure record — would
+		// otherwise land on an orphan and be dropped by persist(). Accepting a
+		// round left the plan `doing` forever, ending re-entrancy on its first
+		// success; rejecting one never incremented attempts, so max_attempts
+		// never tripped and the same round was retried to the iteration cap.
+		const live = findTask(env.store, task.id) ?? current;
+
 		if (verdict.pass) {
 			const plan = planning ? (verdict as PlanVerdict) : undefined;
 			if (plan?.spentResearch) {
 				// Charged on the round that used it, not on the act itself: the
 				// allowance is about how a *branch* is allowed to make progress.
-				current.research_budget = Math.max(0, researchBudgetOf(current, env.config.plan.research_budget) - 1);
+				live.research_budget = Math.max(0, researchBudgetOf(live, env.config.plan.research_budget) - 1);
 			}
 			// A plan is not finished by a round succeeding. It goes back in the
 			// queue and is asked again once this batch has landed — that revisit,
 			// with the results readable on disk, is the entire point of the design.
 			// Only a round that adds nothing closes it.
 			if (planning && !plan?.finished) {
-				current.status = "todo";
-				current.attempts = 0;
-				current.rejections = undefined;
-				if (env.store.loop.current === current.id) env.store.loop.current = "";
+				live.status = "todo";
+				live.attempts = 0;
+				live.rejections = undefined;
+				if (env.store.loop.current === live.id) env.store.loop.current = "";
 				env.store.loop.last_failure = "";
 				persist();
-				if (!dryRun) await checkpoint(env, current, verdict.reason);
-				console.log(`✓ ${current.id} planned — ${verdict.reason}`);
+				if (!dryRun) await checkpoint(env, live, verdict.reason);
+				console.log(`✓ ${live.id} planned — ${verdict.reason}`);
 				continue;
 			}
 
-			markDone(env.store, current, verdict.reason);
+			markDone(env.store, live, verdict.reason);
 			persist();
-			if (!dryRun) await checkpoint(env, current, current.summary ?? "");
+			if (!dryRun) await checkpoint(env, live, live.summary ?? "");
 
-			console.log(`✓ ${current.id} verified`);
+			console.log(`✓ ${live.id} verified`);
 			continue;
 		}
 
-		const attempts = recordFailure(env.store, current, verdict.reason);
-		console.error(`✗ ${current.id} rejected (attempt ${attempts}/${env.config.verify.max_attempts}): ${verdict.reason}`);
+		const attempts = recordFailure(env.store, live, verdict.reason);
+		console.error(`✗ ${live.id} rejected (attempt ${attempts}/${env.config.verify.max_attempts}): ${verdict.reason}`);
 
-		// A round that was cut off left part of a batch in the queue. Those items
-		// are not salvage — each one looks fine alone, and nothing downstream can
-		// tell that the rest are missing. Only on a timeout: a round the check
-		// rejected on its merits finished, and its retry prompt says accepted
-		// items stay.
+		// A cut-off round that was *also* rejected on its merits leaves a half
+		// batch that broke a rule. That is not salvage, so it goes — but only
+		// here, on the rejection path: a cut-off round whose items pass the check
+		// was accepted above and keeps them, because the plan will be asked again
+		// with them in front of it. A round the check rejected without running out
+		// of clock keeps its items too, since its retry prompt promises that.
 		//
 		// Under re-entrancy this must only discard what *this* round wrote. The
 		// earlier rounds' children are all done — that is what made the plan ready
@@ -734,7 +772,7 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 		// completed subtree would delete shipped work.
 		if (result.timedOut && planning) {
 			const dropped: string[] = [];
-			for (const child of unfinishedChildren(current.id, env.store.tasks)) {
+			for (const child of unfinishedChildren(live.id, env.store.tasks)) {
 				dropped.push(...discardChildren(env.store, child.id));
 				env.store.tasks = env.store.tasks.filter((row) => row.id !== child.id);
 				dropped.push(child.id);
@@ -757,18 +795,18 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 		// oversized prompt two more times just spends tokens confirming that.
 		if (
 			env.config.atomic.on_overflow === "promote" &&
-			current.overflowed &&
-			assignmentFor(current) === "act"
+			live.overflowed &&
+			assignmentFor(live) === "act"
 		) {
-			promoteToPlan(env.store, current, `Promoted to plan: ${current.overflow_reason ?? "over budget"}`);
-			current.research_budget = researchBudgetOf(current, env.config.plan.research_budget);
+			promoteToPlan(env.store, live, `Promoted to plan: ${live.overflow_reason ?? "over budget"}`);
+			live.research_budget = researchBudgetOf(live, env.config.plan.research_budget);
 			persist();
-			console.error(`↑ ${current.id} promoted to plan — ${current.overflow_reason}; its next steps get decided next`);
+			console.error(`↑ ${live.id} promoted to plan — ${live.overflow_reason}; its next steps get decided next`);
 			continue;
 		}
 
 		if (attempts >= env.config.verify.max_attempts) {
-			markBlocked(env.store, current, `Blocked after ${attempts} attempts: ${verdict.reason}`);
+			markBlocked(env.store, live, `Blocked after ${attempts} attempts: ${verdict.reason}`);
 			persist();
 			console.error("halting: a task the worker cannot finish should not become an unbounded token burn");
 			return EXIT_ERROR;

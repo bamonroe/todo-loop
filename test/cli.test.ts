@@ -187,3 +187,93 @@ test("the prompt stays behind the -- separator, whatever it starts with", () => 
 	assert.equal(args[args.length - 1], "--version");
 	assert.equal(args[args.length - 2], "--");
 });
+
+/**
+ * A real planning round, driven end to end with a fake `pi` on PATH.
+ *
+ * Everything above this either dry-runs (which never calls the verifier) or
+ * tests the store directly, and both miss the whole of the accept path. A
+ * planning round's check reloads the store from disk to see the rows the
+ * worker just wrote, and anything the caller was still holding across that
+ * call is a detached object whose mutations go nowhere.
+ */
+async function planningRound(
+	script: string,
+	options: { loop?: string; extraTasks?: string } = {},
+): Promise<{ store: ReturnType<typeof loadStore>; stderr: string }> {
+	const repo = fs.mkdtempSync(path.join(os.tmpdir(), "todo-loop-round-"));
+	const bin = path.join(repo, "bin");
+	fs.mkdirSync(bin);
+	fs.writeFileSync(
+		path.join(repo, "todoloop.toml"),
+		`[models]\nworker = "ollama/fake"\nverifier = "ollama/fake"\n\n[loop]\ncheckpoint = "off"\n${options.loop ?? ""}`,
+	);
+	fs.writeFileSync(
+		path.join(repo, "todo.toml"),
+		`[loop]\nrunning = false\ncurrent = ""\niterations = 0\n\n[[task]]\nid = "eq"\ntitle = "Build the equalizer"\nlevel = "plan"\nstatus = "todo"\nattempts = 0\n${options.extraTasks ?? ""}`,
+	);
+	// The fake worker writes this round's items exactly as a real one would.
+	fs.writeFileSync(path.join(bin, "pi"), `#!/bin/sh\n${script}\n`, { mode: 0o755 });
+
+	const result = await run(
+		"node",
+		["--experimental-strip-types", cli, "run", "--max", "1", "--cwd", repo],
+		{ cwd: repo, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } },
+	).catch((error: { stdout?: string; stderr?: string }) => error);
+
+	return { store: loadStore(path.join(repo, "todo.toml")), stderr: result.stderr ?? "" };
+}
+
+test("an accepted planning round leaves the plan ready for its next round", async () => {
+	const { store } = await planningRound(
+		`node --experimental-strip-types ${cli} add eq.scaffold "Scaffold the Gradle project" --parent eq --level act --kind code --detail "app/build.gradle.kts" --cwd "$PWD" >/dev/null`,
+	);
+
+	const plan = store.tasks.find((t) => t.id === "eq");
+	assert.ok(store.tasks.some((t) => t.id === "eq.scaffold"), "the round's item was kept");
+	// "doing" here means the accept path mutated a detached copy: the plan is
+	// left mid-flight and never comes back, which silently ends re-entrancy.
+	assert.equal(plan?.status, "todo", "the plan goes back in the queue for its next round");
+	assert.equal(store.loop.current, "");
+});
+
+test("a rejected planning round records the attempt against the plan", async () => {
+	// A round of nothing but plans is rejected by the check. If the rejection is
+	// written to a detached copy the attempt count never moves, so max_attempts
+	// never trips and the same round is retried until the iteration cap.
+	const { store } = await planningRound(
+		`node --experimental-strip-types ${cli} add eq.storage "Decide how profiles persist" --parent eq --level plan --cwd "$PWD" >/dev/null`,
+	);
+
+	const plan = store.tasks.find((t) => t.id === "eq");
+	assert.equal(plan?.attempts, 1, "the failed round is counted");
+	assert.ok(store.loop.last_failure, "and the reason is kept for the retry prompt");
+});
+
+test("a round cut off after landing good items keeps them and continues next round", async () => {
+	// Run 5: three well-ordered items written, then the clock. Discarding them to
+	// retry from zero under identical conditions is how a productive round became
+	// a failed one.
+	const { store, stderr } = await planningRound(
+		`node --experimental-strip-types ${cli} add eq.scaffold "Scaffold the Gradle project" --parent eq --level act --kind code --detail "app/build.gradle.kts" --cwd "$PWD" >/dev/null\nsleep 5`,
+		{ loop: "plan_timeout_ms = 1500\n" },
+	);
+
+	assert.ok(store.tasks.some((t) => t.id === "eq.scaffold"), "the item it managed to write survives");
+	assert.doesNotMatch(stderr, /discarded/, "nothing is discarded from a round that passed its check");
+	assert.equal(store.tasks.find((t) => t.id === "eq")?.status, "todo", "the plan comes back for the rest");
+});
+
+test("a round cut off before writing anything never closes its plan", async () => {
+	// checkPlanRound reads an empty round as the planner saying "no next step",
+	// which is how a branch ends. On a timeout that reading is wrong: the clock
+	// ran out, and accepting it would close the project on a stopwatch.
+	const { store } = await planningRound("sleep 5", {
+		loop: "plan_timeout_ms = 1500\n",
+		extraTasks: '\n[[task]]\nid = "eq.init"\ntitle = "Initialise the repository"\nparent = "eq"\nstatus = "done"\nattempts = 0\n',
+	});
+
+	const plan = store.tasks.find((t) => t.id === "eq");
+	assert.notEqual(plan?.status, "done", "a stopwatch must not finish a branch");
+	assert.equal(plan?.attempts, 1, "it is a failed round, and counted as one");
+});

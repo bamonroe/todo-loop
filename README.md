@@ -473,7 +473,13 @@ matter most:
   the nesting backstop, and where research acts write what they find. See
   [How a planning round closes](#how-a-planning-round-closes).
 - `loop.plan_timeout_ms` — wall-clock cap on a planning round specifically
-  (`decompose_timeout_ms` is still read).
+  (`decompose_timeout_ms` is still read). A round that runs out of clock is
+  judged on **what it landed**, not on the clock: its items go through the
+  ordinary check, and if they pass they are kept and the plan comes back for
+  the rest. Only a cut-off round that wrote nothing, or wrote something the
+  check rejects, loses its half-batch. A timeout can never close a plan — an
+  empty round means "no next step" when the planner says it, and means the
+  stopwatch when the clock does.
 - `atomic.max_files` / `atomic.on_overflow` — the bottom-level size budget and
   what to do when a task blows through it. See
   [Keeping the bottom level atomic](#keeping-the-bottom-level-atomic).
