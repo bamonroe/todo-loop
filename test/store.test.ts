@@ -8,7 +8,7 @@ import {
 	markBlocked,
 	markDoing,
 	markDone,
-	nextLeaf,
+	nextReady,
 	parentOf,
 	parseStore,
 	recordFailure,
@@ -73,7 +73,7 @@ title = "Y"
 
 test("never hands out an interior node", () => {
 	const store = parseStore(sample);
-	const task = nextLeaf(store);
+	const task = nextReady(store);
 	assert.equal(task?.id, "a.one");
 	assert.ok(isLeaf(task!, store.tasks));
 });
@@ -81,9 +81,9 @@ test("never hands out an interior node", () => {
 test("skips done and blocked tasks", () => {
 	const store = parseStore(sample);
 	markDone(store, store.tasks[1], "done");
-	assert.equal(nextLeaf(store)?.id, "a.two");
+	assert.equal(nextReady(store)?.id, "a.two");
 	markBlocked(store, store.tasks[2], "stuck");
-	assert.equal(nextLeaf(store)?.id, "b");
+	assert.equal(nextReady(store)?.id, "b");
 });
 
 test("rolls a parent up once all children are done", () => {
@@ -140,7 +140,7 @@ test("counts and tree render", () => {
 test("tolerates a missing or malformed queue gracefully", () => {
 	const store = parseStore("[[task]]\ntitle = \"no id\"\n");
 	assert.equal(store.tasks.length, 0);
-	assert.equal(nextLeaf(store), undefined);
+	assert.equal(nextReady(store), undefined);
 });
 
 test("claiming a fresh task clears the last failure", () => {

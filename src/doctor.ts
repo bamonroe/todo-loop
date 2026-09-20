@@ -29,12 +29,12 @@ import {
 	findTask,
 	isLeaf,
 	levelOf,
-	needsBreakdown,
-	nextLeaf,
+	needsPlanning,
+	nextReady,
 	parentOf,
 	type Store,
 } from "./store.ts";
-import { MIN_TITLE_LENGTH } from "./decompose.ts";
+import { MIN_TITLE_LENGTH } from "./plan.ts";
 
 const run = promisify(execFile);
 
@@ -165,14 +165,14 @@ export function auditQueue(store: Store): Check[] {
 		checks.push({ level: "fail", label: "cyclic parents", detail: cyclic.map((task) => task.id).join(", ") });
 	}
 
-	// "A task spawns code" — a task owning children is a contradiction. The CLI
+	// "An act spawns code" — an act owning children is a contradiction. The CLI
 	// refuses to create one, so this catches hand-edited queues.
-	const codeParents = active.filter((task) => task.level === "task" && !isLeaf(task, store.tasks));
+	const codeParents = active.filter((task) => task.level === "act" && !isLeaf(task, store.tasks));
 	if (codeParents.length) {
 		checks.push({
 			level: "fail",
-			label: "tasks with children",
-			detail: `${codeParents.map((task) => task.id).join(", ")} — only a scope or an epic may own children; raise their level`,
+			label: "acts with children",
+			detail: `${codeParents.map((task) => task.id).join(", ")} — only a plan may own children; change their level`,
 		});
 	}
 
@@ -185,16 +185,16 @@ export function auditQueue(store: Store): Check[] {
 		checks.push({
 			level: "fail",
 			label: "level violations",
-			detail: `${badLevels.map((task) => `${task.id} [${levelOf(task)}]`).join(", ")} — an epic spawns scopes or tasks, a scope spawns tasks`,
+			detail: `${badLevels.map((task) => `${task.id} [${levelOf(task)}]`).join(", ")} — only a plan may own children`,
 		});
 	}
 
-	const pending = active.filter((task) => task.status !== "done" && needsBreakdown(task, store.tasks));
+	const pending = active.filter((task) => task.status !== "done" && needsPlanning(task, store.tasks));
 	if (pending.length) {
 		checks.push({
 			level: "ok",
-			label: "pending breakdowns",
-			detail: `${pending.map((task) => `${task.id} [${levelOf(task)}]`).join(", ")} — the loop will break these down before implementing anything under them`,
+			label: "plans with no round yet",
+			detail: `${pending.map((task) => task.id).join(", ")} — the loop will decide their next steps before building anything under them`,
 		});
 	}
 
@@ -209,8 +209,8 @@ export function auditQueue(store: Store): Check[] {
 		});
 	}
 
-	// Still every non-leaf, level or not: a scope's detail *is* shown by the
-	// breakdown prompt, but only while it is childless — and then it is a leaf.
+	// Still every non-leaf, level or not: a plan's detail *is* shown by the
+	// planning prompt, but only while it is childless — and then it is a leaf.
 	// Once it has children nothing prompts it again, so the text is dead.
 	const detailedParents = active.filter((task) => !isLeaf(task, store.tasks) && task.detail);
 	if (detailedParents.length) {
@@ -226,7 +226,7 @@ export function auditQueue(store: Store): Check[] {
 	// model and a verifier asked to judge a diff against it, which is how a task
 	// gets "finished" three different ways.
 	const bare = active.filter(
-		(task) => isLeaf(task, store.tasks) && task.status === "todo" && levelOf(task) === "task" && !task.detail,
+		(task) => isLeaf(task, store.tasks) && task.status === "todo" && levelOf(task) === "act" && !task.detail,
 	);
 	if (bare.length) {
 		checks.push({
@@ -268,11 +268,11 @@ export function auditQueue(store: Store): Check[] {
 	const waiting = blockedLeaves(store);
 	if (waiting.length) {
 		checks.push({
-			level: nextLeaf(store) ? "ok" : "fail",
+			level: nextReady(store) ? "ok" : "fail",
 			label: "waiting on dependencies",
 			detail:
 				`${waiting.map((entry) => `${entry.task.id} (needs ${entry.waitingOn.join(", ")})`).join(", ")}` +
-				(nextLeaf(store)
+				(nextReady(store)
 					? " — skipped until their blockers ship"
 					: " — and nothing else is runnable, so the queue is stuck rather than finished"),
 		});
@@ -282,15 +282,15 @@ export function auditQueue(store: Store): Check[] {
 	const archived = store.tasks.length - active.length;
 	const activeLeaves = active.filter((task) => isLeaf(task, store.tasks)).length;
 	checks.push({
-		level: nextLeaf(store) ? "ok" : "warn",
+		level: nextReady(store) ? "ok" : "warn",
 		label: "queue",
 		detail:
 			`${store.schema.name} schema, ${active.length} active task${active.length === 1 ? "" : "s"}` +
 			(archived ? `, ${archived} archived` : "") +
 			`, ${activeLeaves} leaves, ${stats.todo} todo, ${stats.blocked} blocked` +
-			(stats.pending_breakdowns ? `, ${stats.pending_breakdowns} awaiting breakdown` : "") +
+			(stats.pending_breakdowns ? `, ${stats.pending_breakdowns} plans not yet started` : "") +
 			(waiting.length ? `, ${waiting.length} waiting on dependencies` : "") +
-			(nextLeaf(store) ? `, next is ${nextLeaf(store)?.id}` : ", nothing runnable"),
+			(nextReady(store) ? `, next is ${nextReady(store)?.id}` : ", nothing runnable"),
 	});
 
 	return checks;

@@ -11,8 +11,8 @@ import {
 	loadStore,
 	markBlocked,
 	markDone,
-	needsBreakdown,
-	nextLeaf,
+	needsPlanning,
+	nextReady,
 	parseStore,
 	recordFailure,
 	renderTree,
@@ -146,7 +146,7 @@ test("works the most urgent leaf, not the first one in the file", () => {
 	const store = projectStore();
 	// `later` is earlier in the file and has a lower `order`, but `urgent` is
 	// critical and urgency outranks both.
-	assert.equal(nextLeaf(store)?.id, "urgent");
+	assert.equal(nextReady(store)?.id, "urgent");
 	assert.deepEqual(
 		workingOrder(store).map((task) => task.id),
 		["parity", "urgent", "later", "shipped"],
@@ -166,7 +166,7 @@ test("archived work still counts as a breakdown", () => {
 	// archive it looks like nobody ever broke it down, and the loop scopes it
 	// a second time into duplicate children.
 	assert.equal(childrenOf("later", store.tasks).length, 1);
-	assert.equal(needsBreakdown(later, store.tasks), false);
+	assert.equal(needsPlanning(later, store.tasks), false);
 });
 
 test("finishing a task moves it to the archive the way the project CLI does", () => {
@@ -290,7 +290,7 @@ tags = []
 test("a leaf waiting on a dependency is skipped, however urgent", () => {
 	const store = parseStore(GATED, { archiveText: "", archiveFile: "FINISHED.toml" });
 	// `teal` is critical and first by order; it still loses to the task it needs.
-	assert.equal(nextLeaf(store)?.id, "lock");
+	assert.equal(nextReady(store)?.id, "lock");
 	assert.deepEqual(unmetBlockers(findTask(store, "teal") as Task, store.tasks), ["lock"]);
 	assert.equal(blockedLeaves(store).length, 1);
 });
@@ -298,7 +298,7 @@ test("a leaf waiting on a dependency is skipped, however urgent", () => {
 test("finishing the blocker releases what was waiting on it", () => {
 	const store = parseStore(GATED, { archiveText: "", archiveFile: "FINISHED.toml" });
 	markDone(store, findTask(store, "lock") as Task, "shipped");
-	assert.equal(nextLeaf(store)?.id, "teal");
+	assert.equal(nextReady(store)?.id, "teal");
 	assert.equal(blockedLeaves(store).length, 0);
 });
 
@@ -309,7 +309,7 @@ test("a blocker that does not exist never opens", () => {
 	});
 	// An unknown id is unmet, not satisfied: one typo must not silently disable
 	// the guard. `lock` is still runnable, so the queue moves; `teal` does not.
-	assert.equal(nextLeaf(store)?.id, "lock");
+	assert.equal(nextReady(store)?.id, "lock");
 	assert.deepEqual(blockedLeaves(store)[0]?.waitingOn, ["typo"]);
 });
 

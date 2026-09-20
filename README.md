@@ -66,11 +66,11 @@ own CLI owns the file and the two have to be able to hand it back and forth:
    `active` to `in-progress`. Delete the state file to forget every attempt
    count — nothing about the work itself is in there. Gitignore it if you would
    rather it did not travel with the repo.
-3. **New rows look like old ones.** A task the loop adds during a breakdown gets
+3. **New rows look like old ones.** An item the loop adds during a round gets
    the same metadata every other row carries, including an `order` ten past the
    highest in use.
 
-The archive is read as well as written. A scope that was broken down and has
+The archive is read as well as written. A plan whose children have
 since shipped its children would otherwise look untouched, and the loop would
 break it down a second time into duplicate children.
 
@@ -168,7 +168,7 @@ If neither suits, there are two cheaper local options:
 
 - **Shrink the worker's context.** KV cache is real VRAM. Dropping the worker
   from a 52k to a 16k context variant can free enough for a small verifier to
-  stay resident — and if tasks are scoped tightly enough, 16k is plenty.
+  stay resident — and if acts are kept tight enough, 16k is plenty.
 - **Use the same model as its own verifier.** Cheapest and weakest. It still
   catches empty diffs and failing tests, because those are answered by tooling
   before the model is asked anything, but it will wave through work that is
@@ -187,7 +187,7 @@ todo add api.route  "Add GET /health returning 200" --detail "JSON body with sta
 todo add api.test   "Cover /health with a test"
 
 # or let the loop do the breaking down:
-todo add auth "Rebuild the authentication system" --level epic
+todo add auth "Rebuild the authentication system" --level plan
 
 todo run                 # drives the whole queue
 todo run --dry-run       # prints each prompt instead of calling a model
@@ -220,7 +220,7 @@ pi -e /path/to/todo-loop/extension/index.ts
 ```
 
 Three tools reach the model: `todo_complete`, `todo_block`, and `todo_add` —
-the last only while a scope or an epic is being broken down.
+the last only while a plan is being worked.
 
 To load it permanently, add it to `~/.pi/agent/settings.json` or drop a symlink
 in `.pi/extensions/`.
@@ -253,10 +253,10 @@ along with the attempt count.
 A verifier that is unreachable, or that returns something unparseable, fails
 closed. Silence is never a pass.
 
-A **breakdown** — a scope or an epic being split up — skips steps 2 and 3
+A **planning round** skips steps 2 and 3
 entirely. It runs no build and no tests (it changed no code, so there is nothing
 to build), and asks no model. See
-[How a breakdown closes](#how-a-breakdown-closes).
+[How a planning round closes](#how-a-planning-round-closes).
 
 ## What the extension does to your context
 
@@ -302,59 +302,88 @@ status = "todo"
 attempts = 0
 ```
 
-### Levels — task, scope, epic
+### Levels — act and plan
 
-`level` says how big an item is, and therefore what *working* it means:
+`level` says what a session *does*, not how big the work is:
 
-- **`task`** (the default) — atomic and implementable as written. This is the
-  only level that writes code.
-- **`scope`** — not yet implementable. Working it means reading the code to find
-  out what actually needs to happen, then adding the concrete tasks it breaks
-  into. A scope produces queue entries, not code.
-- **`epic`** — a spanning feature. Working it means adding `scope` children where
-  the shape is still unclear and `task` children where the work is already clear.
+- **`act`** (the default) — one session, one diff, one verdict. The only level
+  that writes. `kind` says what it produces: `code` (the default), `docs`, or
+  `research` — which finds something out and appends it to `plan.memory_file`.
+- **`plan`** — decides what the next few steps are and writes them to the queue.
+  It touches no files; a non-empty diff rejects the round.
 
-**An epic spawns scopes, a scope spawns tasks, a task spawns code.** You do not
-have to decompose anything up front: drop an epic in the queue and the loop
-breaks it down as its first assignment.
+A plan may spawn either kind, so nesting is unbounded. You do not have to break
+anything down up front: drop a single plan in the queue and the loop grows the
+rest itself.
 
-A childless scope or epic is a *breakdown* assignment. Once it has children it is
-a container — never prompted again, closed by roll-up. Levels are optional and
-backwards compatible: an item with children and no `level` is a container, which
-is what a parent has always been here, so existing queues need no edit.
+This replaced a fixed ladder — epic spawns scopes, scope spawns tasks — where
+`level` encoded depth. That shape forced the first session to scope an entire
+project before any of it existed. Across three real runs the model spent roughly
+82% of its output tokens on that one up-front design, and never once used the
+deferral level it was given. Old queues still load: `epic` and `scope` both read
+as `plan`, `task` reads as `act`, and a file that spells it the old way is
+written back out in its own words.
 
 ```toml
 [[task]]
 id = "auth"
 title = "Rebuild authentication"
-level = "epic"
+level = "plan"
 status = "todo"
 attempts = 0
 ```
 
-### How a breakdown closes
+### Plans are re-entrant
+
+A plan is **not** finished by having children. Every time its whole batch is
+done it becomes startable again, and the prompt hands it the last few things
+that landed. It closes only when a round adds nothing — a planner saying there
+is no next step. Roll-up deliberately refuses to close one on its children's
+behalf, which would end the branch at round one.
+
+So a plan is only ever asked *"what are the next few things?"*, never *"design
+this project"*. It never spends a session guessing at code that does not exist
+yet, because the code it needs to see is on disk by the time it is asked.
+
+Termination stops coming from a depth cap and starts coming from planners
+running out of next steps. `plan.max_depth` (default 8) remains only as a
+backstop against a branch that plans forever without building.
+
+### How a planning round closes
 
 Nothing about it is a judgement call, so no model is asked and nothing leaves the
-machine. `todo_complete` on a scope or an epic checks:
+machine. `todo_complete` on a plan checks:
 
-- children exist — at least `decompose.min_children` of them for an **epic**;
-  a **scope** may return a single task, because "it turns out to be one task" is
-  a real answer to an open question
-- each child's level is one the parent may spawn
-- each child's title can stand on its own
-- no cycles
+- the round is within `plan.max_children` (default 5) — it is "what is next",
+  not the whole project
+- it lands **at least one act**. A round of nothing but plans is rejected:
+  planning that spawns more planning always feels productive and never risks a
+  failing build, so it is a gate rather than a request
+- research is within allowance. A `research` act satisfies the rule above, but
+  only `plan.research_budget` times per branch (default 2), and the remaining
+  allowance is **inherited** by child plans rather than reset — otherwise a
+  planner refills it by spawning a sub-planner to keep reading
+- each child's title can stand on its own, and no cycles
 - **the working tree is unchanged**
 
-That last one is the same hard failure as an implementation task's empty diff,
-inverted. "A scope produces todos, not code" is enforced, not requested.
+That last one is the same hard failure as an act's empty diff, inverted. "A plan
+produces queue entries, not code" is enforced, not requested.
 
-### Keeping the bottom level atomic
+An empty round is legal *only* once the branch has delivered something; on the
+first round it would close a project having built nothing.
 
-A leaf task has to fit in one session of a model with no memory of any other
-session. The breakdown prompt states that as tests the model can actually apply
-rather than an adjective — name the files it touches, count them against
-`atomic.max_files`, no "and" in the description, self-contained detail,
-verifiable from the diff alone. If it cannot name the files, it is still a scope.
+Acts are inserted ahead of their plan siblings within a round. Without that the
+at-least-one-act rule holds as a property of the data while delivering nothing:
+depth-first through `[plan, plan, act]` leaves the act at the bottom of a subtree
+for hours. Ordering it first is what makes the rule a heartbeat.
+
+### Keeping acts atomic
+
+An act has to fit in one session of a model with no memory of any other session.
+The planning prompt states that as tests the model can actually apply rather than
+an adjective — name the files it touches, count them against `atomic.max_files`,
+no "and" in the description, self-contained detail, verifiable from the diff
+alone. If it cannot name the files, it is still a plan.
 
 Prompting alone would not hold that line, so the loop also measures it. Two
 signals mark a task as having overrun its budget:
@@ -381,8 +410,8 @@ surface it:
   loop break them down itself.
 ```
 
-`promote` closes the loop: a task that overran its budget **and** failed
-verification is turned into a scope and broken down on the next pass, instead of
+`promote` closes the loop: an act that overran its budget **and** failed
+verification is turned into a plan and re-decided on the next pass, instead of
 spending two more attempts re-running the same oversized prompt. It only fires on
 failure — oversized work that verified fine is left alone and merely flagged.
 
@@ -426,9 +455,13 @@ matter most:
   task that did not do it, and the diff the verifier judges is wrong by the same
   amount. Refusing to start costs one `git stash`.
 - `loop.on_silent_stop` — `halt` (default) or `retry`.
-- `decompose.min_children` — smallest breakdown accepted **from an epic**,
-  default 2. Scopes are exempt; see
-  [How a breakdown closes](#how-a-breakdown-closes).
+- `plan.max_children` / `plan.research_budget` / `plan.max_depth` /
+  `plan.memory_file` — the size of a round, how many rounds a branch may close
+  with research alone, the nesting backstop, and where research acts write what
+  they find. See
+  [How a planning round closes](#how-a-planning-round-closes).
+- `loop.plan_timeout_ms` — wall-clock cap on a planning round specifically
+  (`decompose_timeout_ms` is still read).
 - `atomic.max_files` / `atomic.on_overflow` — the bottom-level size budget and
   what to do when a task blows through it. See
   [Keeping the bottom level atomic](#keeping-the-bottom-level-atomic).
@@ -442,7 +475,8 @@ todo status [--all]            Show the queue (--all includes archived work)
 todo stop                      Stop a running loop after the current task
 todo next [--id]               Print the next task's prompt (exit 3 when empty)
 todo start                     Claim the next task and print its prompt
-todo add <id> <title...>       Append a task (--detail "...", --parent <id>, --level task|scope|epic,
+todo add <id> <title...>       Append an item (--detail "...", --parent <id>, --level act|plan,
+                              --kind code|docs|research,
                                --category <c>, --urgency <u> where the schema has them)
 todo done <id> [summary...]    Mark done without verifying
 todo block <id> <reason...>    Mark blocked
@@ -474,7 +508,7 @@ The suite covers the TOML round-trip, leaf selection and roll-up, prompt
 rendering, git evidence collection against a real temporary repository, the
 verdict parser against the shapes local models actually emit, queue-shape
 auditing, provider resolution and credential lookup against a stub endpoint,
-levels and the breakdown gate, and the CLI end to end in `--dry-run`.
+levels and the planning gate, and the CLI end to end in `--dry-run`.
 
 There is also a live check that needs a running model:
 
@@ -483,19 +517,19 @@ node scripts/live-extension-check.ts        # add --keep to inspect the workspac
 ```
 
 It drives the extension inside a real pi session over RPC with a mixed queue — a
-plain task and a scope — which exercises the part the fakes cannot: that
+plain act and a plan — which exercises the part the fakes cannot: that
 `newSession` works from a command, that the `/todo-advance` a tool queues is
 actually dispatched, and that the tools reach the model at all. It reports any
 `extension_error` pi emits.
 
-The scope is there for a second reason. A fake API will accept a breakdown no
+The plan is there for a second reason. A fake API will accept a round no
 real model would produce, so the check prints the children the model invents,
 with their details, for you to read. **Whether a small model decomposes *well* is
-not something the mechanical gate can answer** — it catches empty breakdowns,
+not something the mechanical gate can answer** — it catches empty rounds,
 code in a breakdown and illegal levels, but a well-formed and useless breakdown
 passes. That is the same class of failure the model verifier exists to catch on
 the implementation side, and it is the one assumption in the level design that is
-still unvalidated. Read the output before trusting a long queue of epics to it.
+still unvalidated. Read the output before leaving it alone with a project.
 
 The extension is driven against a fake pi API, so the wiring that only exists at
 runtime is covered too: which hook fires when, that a rejection resumes the

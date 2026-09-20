@@ -1,6 +1,6 @@
 ---
 name: todo-loop
-description: Set up and run the todo-loop autonomous task queue in a project — write todoloop.toml and todo.toml, choose build and test commands that gate verification, author a queue of tasks, scopes and epics, and drive the loop. Use when asked to set up todo-loop, initialise a todo queue, add tasks or epics to one, choose a build_command for it, or start an autonomous loop with /todo-run or `todo run`.
+description: Set up and run the todo-loop autonomous task queue in a project — write todoloop.toml and todo.toml, choose build and test commands that gate verification, author a queue of acts and plans, and drive the loop. Use when asked to set up todo-loop, initialise a todo queue, add work to one, choose a build_command for it, or start an autonomous loop with /todo-run or `todo run`.
 compatibility: Needs the todo-loop package installed and the `todo` CLI on PATH. Node 22.18+, a git repository, and a reachable verifier model.
 ---
 
@@ -58,10 +58,10 @@ runs after every task. Tasks are **local**: each touches a slice of the work.
   any subset of the finished work satisfies them.
 - Completeness checks do not. *"All four files exist"*, *"every endpoint is
   implemented"* — the first task cannot pass without doing all the others,
-  which blows its scope and defeats the decomposition entirely.
+  which blows its scope and defeats the whole arrangement.
 
-This failure is silent: the queue still runs, each task just quietly grows to
-the size of the whole epic. Phrase every check as *this did not break anything*,
+This failure is silent: the queue still runs, each act just quietly grows to
+the size of the whole project. Phrase every check as *this did not break anything*,
 never *the project is finished*.
 
 ## Writing the queue
@@ -74,7 +74,7 @@ rolls up to `done` on its own once every child is done.
 todo add api.route "Add GET /health returning 200" \
   --detail "Edit src/router.ts only. JSON body with status and uptime fields."
 
-todo add auth "Rebuild the authentication system" --level epic
+todo add auth "Rebuild the authentication system" --level plan
 ```
 
 Hierarchy comes from `--parent`, or from dotted ids when it is absent
@@ -82,30 +82,56 @@ Hierarchy comes from `--parent`, or from dotted ids when it is absent
 
 ### Levels
 
-- **`task`** (the default) — atomic and implementable as written. The only level
-  that writes code.
-- **`scope`** — not yet implementable. Working it means reading the code to find
-  out what needs to happen, then adding the concrete tasks. Produces queue
-  entries, not code.
-- **`epic`** — a spanning feature. Produces scopes where the shape is unclear and
-  tasks where it is already clear.
+A level says what a session *does*, not how big the work is.
 
-An epic spawns scopes, a scope spawns tasks, a task spawns code. Nothing needs
-decomposing up front — drop an epic in and the loop breaks it down as its first
-assignment.
+- **`act`** (the default) — one session, one diff, one verdict. The only level
+  that writes. Its `--kind` says what it produces:
+  - `code` (the default) — writes or changes code.
+  - `docs` — writes or changes documentation.
+  - `research` — finds something out and appends it to `plan.memory_file`.
+- **`plan`** — decides what the next few steps are and writes them to the queue.
+  Touches no files; a non-empty diff rejects the round.
 
-### What makes a leaf atomic
+A plan may spawn either kind, so nesting is unbounded. Drop a single plan in and
+the loop grows the rest of the queue itself.
 
-A leaf must be finishable by one worker in one session with no memory of any
+### Plans are re-entrant
+
+A plan is **not** finished by having children. Every time its whole batch is
+done it comes back for another round, and is handed the last few things that
+landed so it decides the next step against a repository that now contains them.
+It closes only when a round adds nothing — a planner saying there is no next
+step.
+
+This is the point of the design. A plan is only ever asked *"what are the next
+few things?"*, never *"design this project"*, so it never spends a session
+guessing at code that does not exist yet.
+
+Two rules keep it honest, both enforced mechanically:
+
+- **Every round must land at least one act.** A round of nothing but plans is
+  rejected. Planning that spawns more planning always feels productive and never
+  risks a failing build.
+- **Research is allowanced.** A `research` act satisfies that rule, but only
+  `plan.research_budget` times per branch (default 2) — and the remaining
+  allowance is *inherited* by child plans rather than reset, so a planner cannot
+  refill it by spawning a sub-planner to keep reading.
+
+`plan.max_children` (default 5) caps a round, and `plan.max_depth` (default 8) is
+a backstop against a branch that only ever plans.
+
+### What makes an act atomic
+
+An act must be finishable by one worker in one session with no memory of any
 other session. Apply these as tests, not as adjectives:
 
-- It names the files it touches. **If you cannot name them, it is not a task
-  yet — make it a scope.**
+- It names the files it touches. **If you cannot name them, it is not an act
+  yet — make it a plan.**
 - It stays within `atomic.max_files` (default 5).
 - Its description has no "and" in it.
 - It is verifiable from the diff alone.
 
-`--detail` is the only context that task will ever have. Put everything it needs
+`--detail` is the only context that item will ever have. Put everything it needs
 there — the file paths, the exact signature, the names of things that already
 exist. Being specific here is what makes small models work.
 
@@ -161,11 +187,11 @@ the two signals that a task was not atomic. The shell driver has no such signal.
 
 An unreachable or unparseable verifier fails closed. Silence is never a pass.
 
-A **breakdown** — a scope or epic being split — skips all of that. It runs no
-build and asks no model. It is checked mechanically: children exist, their
-levels are legal, titles stand alone, no cycles, and **the working tree is
-unchanged**. That last one is the empty-diff rule inverted: a scope produces
-todos, not code, and this is enforced rather than requested.
+A **planning round** skips all of that. It runs no build and asks no model. It
+is checked mechanically: the round is within the cap, it lands at least one act,
+research is within allowance, titles stand alone, no cycles, and **the working
+tree is unchanged**. That last one is the empty-diff rule inverted: a plan
+produces queue entries, not code, and this is enforced rather than requested.
 
 ## Diagnosing a stuck queue
 
@@ -177,9 +203,9 @@ A task blocked after three rejections usually means the task text was ambiguous,
 not that the model is incapable. Read the recorded failure, rewrite the
 `--detail` to be specific, then reset it.
 
-A task flagged as over budget was not atomic. Split it, or set
-`atomic.on_overflow = "promote"` to have the loop turn a failed oversized task
-into a scope and break it down itself.
+An act flagged as over budget was not atomic. Split it, or set
+`atomic.on_overflow = "promote"` to have the loop turn a failed oversized act
+into a plan and decide its next steps itself.
 
 ## Things worth knowing
 
@@ -187,6 +213,9 @@ into a scope and break it down itself.
   output is the weakest form of this check.
 - `todo.toml` and `todoloop.toml` are excluded from the diff the verifier sees,
   so the loop's own bookkeeping cannot make an empty task look productive.
-- A well-formed but useless breakdown passes the mechanical gate. Whether a
-  small model decomposes *well* is not something tooling can answer — read the
-  children it invents before trusting a long queue of epics to it.
+- A well-formed but useless round passes the mechanical gate. Whether a small
+  model plans *well* is not something tooling can answer — read the first few
+  rounds it produces before leaving it alone with a project.
+- Nothing stops a round from satisfying the at-least-one-act rule with an act
+  that is real but unrelated to the branch it is on. There is no clean
+  mechanical guard for that; watch for it rather than assuming it cannot happen.

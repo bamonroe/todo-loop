@@ -21,7 +21,7 @@ import {
 import { diagnose, formatChecks } from "./doctor.ts";
 import { commitAll, gatherEvidence, headCommit, isGitRepo, isTreeClean, loopOwnedPaths, revertTo } from "./evidence.ts";
 import { renderAssignmentPrompt } from "./prompt.ts";
-import { checkDecomposition } from "./decompose.ts";
+import { checkPlanRound, type PlanVerdict } from "./plan.ts";
 import {
 	allowedChildLevels,
 	assignmentFor,
@@ -35,12 +35,15 @@ import {
 	insertChildren,
 	levelOf,
 	markOverflow,
-	promoteToScope,
+	kindOf,
+	promoteToPlan,
+	researchBudgetOf,
+	unfinishedChildren,
 	loadStore,
 	markBlocked,
 	markDoing,
 	markDone,
-	nextLeaf,
+	nextReady,
 	recordFailure,
 	renderTree,
 	resolveStorePath,
@@ -144,20 +147,18 @@ async function evidenceFor(env: Env) {
 }
 
 /**
- * A breakdown is checked against the store and the diff; an implementation is
- * checked by a model. Both are gated on the same evidence, so this is the only
- * place that has to know which kind of work just happened.
+ * A planning round is checked against the store and the diff; an act is checked
+ * by a model. Both are gated on the same evidence, so this is the only place
+ * that has to know which kind of work just happened.
  */
-async function verifyTask(env: Env, task: Task, signal?: AbortSignal): Promise<Verdict> {
-	const decomposing = assignmentFor(task) === "decompose";
-
-	if (decomposing) {
+async function verifyTask(env: Env, task: Task, signal?: AbortSignal): Promise<Verdict | PlanVerdict> {
+	if (assignmentFor(task) === "plan") {
 		// Re-read: the worker added children through the CLI, so the in-memory
 		// store is stale by exactly the rows that decide this verdict.
 		env.store = loadStore(env.storeFile);
 		const current = findTask(env.store, task.id) ?? task;
 		const evidence = await evidenceFor(env);
-		return checkDecomposition(env.store, current, evidence.files, env.config);
+		return checkPlanRound(env.store, current, evidence.files, env.config);
 	}
 
 	if (!env.config.verify.enabled) return { pass: true, reason: "Verification disabled.", mechanical: true };
@@ -188,7 +189,8 @@ const USAGE = `todo — autonomous todo loop for pi
   todo stop                      Stop a running loop after the current task
   todo next [--id]               Print the next task's prompt (exit 3 when empty)
   todo start                     Claim the next task and print its prompt
-  todo add <id> <title...>       Append a task (--detail "...", --parent <id>, --level task|scope|epic,
+  todo add <id> <title...>       Append an item (--detail "...", --parent <id>, --level act|plan,
+                                --kind code|docs|research,
                                  --category <c>, --urgency <u> where the schema has them)
   todo done <id> [summary...]    Mark done without verifying
   todo block <id> <reason...>    Mark blocked
@@ -260,7 +262,7 @@ function commandStatus(env: Env, flags: Flags): number {
 	console.log(
 		`\n${stats.done} done · ${stats.todo} todo · ${stats.doing} in progress · ${stats.blocked} blocked` +
 			(waiting.length ? ` · ${waiting.length} waiting on dependencies` : "") +
-			(stats.pending_breakdowns ? ` · ${stats.pending_breakdowns} awaiting breakdown` : "") +
+			(stats.pending_breakdowns ? ` · ${stats.pending_breakdowns} plans not yet started` : "") +
 			`\n${queueLine(env)}` +
 			`\nloop: ${env.store.loop.running ? "running" : "stopped"}` +
 			(env.store.loop.current ? ` · current ${env.store.loop.current}` : "") +
@@ -269,7 +271,7 @@ function commandStatus(env: Env, flags: Flags): number {
 	if (env.store.loop.last_failure) console.log(`last failure: ${env.store.loop.last_failure}`);
 	// The distinction worth drawing loudly: a queue with nothing runnable is
 	// either finished or stuck, and those call for opposite responses.
-	if (waiting.length && !nextLeaf(env.store)) {
+	if (waiting.length && !nextReady(env.store)) {
 		console.log(
 			`\nnothing is runnable, but ${waiting.length} task(s) are only waiting on dependencies — the queue is stuck, not done.`,
 		);
@@ -286,7 +288,7 @@ function commandStop(env: Env): number {
 }
 
 function commandNext(env: Env, flags: Flags): number {
-	const task = nextLeaf(env.store);
+	const task = nextReady(env.store);
 	if (!task) return EXIT_EMPTY;
 	if (bool(flags, "id")) {
 		console.log(task.id);
@@ -300,7 +302,10 @@ function commandNext(env: Env, flags: Flags): number {
 			attempts: task.attempts,
 			maxAttempts: env.config.verify.max_attempts,
 			maxFiles: env.config.atomic.max_files,
-			minChildren: env.config.decompose.min_children,
+			maxChildren: env.config.plan.max_children,
+			researchBudget: researchBudgetOf(task, env.config.plan.research_budget),
+			maxDepth: env.config.plan.max_depth,
+			memoryFile: env.config.plan.memory_file,
 			buildCommand: env.config.verify.build_command,
 			testCommand: env.config.verify.test_command,
 		}),
@@ -309,7 +314,7 @@ function commandNext(env: Env, flags: Flags): number {
 }
 
 async function commandStart(env: Env, flags: Flags): Promise<number> {
-	const task = nextLeaf(env.store);
+	const task = nextReady(env.store);
 	if (!task) return EXIT_EMPTY;
 	markDoing(env.store, task, await headCommit(env.cwd));
 	saveStore(env.storeFile, env.store);
@@ -326,9 +331,14 @@ function commandAdd(env: Env, flags: Flags): number {
 		console.error(`task ${id} already exists`);
 		return EXIT_ERROR;
 	}
-	const levelRaw = str(flags, "level", "task").trim().toLowerCase();
-	if (levelRaw !== "task" && levelRaw !== "scope" && levelRaw !== "epic") {
-		console.error(`--level must be task, scope or epic (got ${levelRaw})`);
+	const levelRaw = str(flags, "level", "act").trim().toLowerCase();
+	if (levelRaw !== "act" && levelRaw !== "plan") {
+		console.error(`--level must be act or plan (got ${levelRaw})`);
+		return EXIT_ERROR;
+	}
+	const kindRaw = str(flags, "kind", "code").trim().toLowerCase();
+	if (kindRaw !== "code" && kindRaw !== "docs" && kindRaw !== "research") {
+		console.error(`--kind must be code, docs or research (got ${kindRaw})`);
 		return EXIT_ERROR;
 	}
 
@@ -336,7 +346,8 @@ function commandAdd(env: Env, flags: Flags): number {
 		id,
 		title: titleParts.join(" "),
 		detail: str(flags, "detail") || undefined,
-		level: levelRaw !== "task" ? levelRaw : undefined,
+		level: levelRaw === "plan" ? "plan" : undefined,
+		kind: levelRaw === "act" ? kindRaw : undefined,
 		category: str(flags, "category") || undefined,
 		urgency: str(flags, "urgency") || undefined,
 	});
@@ -352,19 +363,22 @@ function commandAdd(env: Env, flags: Flags): number {
 		// — no need to declare its level first. Only an explicit `level = "task"`
 		// is refused, because that is a contradiction someone wrote on purpose.
 		const allowed = allowedChildLevels(effectiveLevel(owner, env.store.tasks));
-		if (owner.level === "task") {
-			console.error(`${parent} is declared a task and cannot own children; make it a scope or an epic first`);
+		if (owner.level === "act") {
+			console.error(`${parent} is declared an act and cannot own children; make it a plan first`);
 			return EXIT_ERROR;
 		}
 		if (allowed.length && !allowed.includes(levelRaw)) {
-			console.error(
-				`a ${effectiveLevel(owner, env.store.tasks)} may only spawn ${allowed.join(" or ")} (got ${levelRaw})`,
-			);
+			console.error(`a ${effectiveLevel(owner, env.store.tasks)} may only spawn ${allowed.join(" or ")} (got ${levelRaw})`);
 			return EXIT_ERROR;
+		}
+		// The allowance is inherited, never refreshed: a planner that has spent its
+		// research rounds cannot get more by spawning a sub-planner to keep reading.
+		if (levelRaw === "plan") {
+			task.research_budget = researchBudgetOf(owner, env.config.plan.research_budget);
 		}
 		task.parent = parent;
 		// Order is priority order, so children belong beside their parent rather
-		// than behind every unrelated epic already in the queue.
+		// than behind every unrelated plan already in the queue.
 		insertChildren(env.store, parent, [task]);
 	} else {
 		env.store.tasks.push(task);
@@ -372,7 +386,7 @@ function commandAdd(env: Env, flags: Flags): number {
 
 	rollup(env.store);
 	saveStore(env.storeFile, env.store);
-	console.log(`added ${id}${parent ? ` under ${parent}` : ""}${levelRaw !== "task" ? ` [${levelRaw}]` : ""}`);
+	console.log(`added ${id}${parent ? ` under ${parent}` : ""} [${levelRaw === "plan" ? "plan" : kindRaw}]`);
 	return EXIT_OK;
 }
 
@@ -425,7 +439,7 @@ function commandReset(env: Env, flags: Flags): number {
 
 async function commandVerify(env: Env, flags: Flags): Promise<number> {
 	const id = flags.positional[0] ?? env.store.loop.current;
-	const task = id ? findTask(env.store, id) : nextLeaf(env.store);
+	const task = id ? findTask(env.store, id) : nextReady(env.store);
 	if (!task) {
 		console.error("no task to verify");
 		return EXIT_ERROR;
@@ -609,7 +623,7 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 			return EXIT_OK;
 		}
 
-		const task = nextLeaf(env.store);
+		const task = nextReady(env.store);
 		if (!task) {
 			env.store.loop.running = false;
 			persist();
@@ -635,15 +649,18 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 			attempts: task.attempts,
 			maxAttempts: env.config.verify.max_attempts,
 			maxFiles: env.config.atomic.max_files,
-			minChildren: env.config.decompose.min_children,
+			maxChildren: env.config.plan.max_children,
+			researchBudget: researchBudgetOf(task, env.config.plan.research_budget),
+			maxDepth: env.config.plan.max_depth,
+			memoryFile: env.config.plan.memory_file,
 			buildCommand: env.config.verify.build_command,
 			testCommand: env.config.verify.test_command,
 		});
 
-		const kind = assignmentFor(task) === "decompose" ? `break down ${levelOf(task)}` : "implement";
+		const planning = assignmentFor(task) === "plan";
+		const kind = planning ? "plan next steps for" : `${kindOf(task)}`;
 		console.log(`\n=== [${iteration}/${maxIterations}] ${kind} — ${task.id}: ${task.title} ===`);
-		const decomposing = assignmentFor(task) === "decompose";
-		const budgetMs = decomposing ? env.config.loop.decompose_timeout_ms : env.config.loop.worker_timeout_ms;
+		const budgetMs = planning ? env.config.loop.plan_timeout_ms : env.config.loop.worker_timeout_ms;
 		const result = await runPi(env, prompt, dryRun, budgetMs);
 		if (result.code !== 0) console.error(`pi exited ${result.code}; verifying anyway`);
 
@@ -667,9 +684,31 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 		const verdict = result.timedOut
 			? { pass: false, reason: `Worker exceeded its ${budgetMs}ms budget.` }
 			: dryRun
-				? { pass: true, reason: "dry run" }
+				? { pass: true, reason: "dry run", finished: true }
 				: await verifyTask(env, current);
 		if (verdict.pass) {
+			const plan = planning ? (verdict as PlanVerdict) : undefined;
+			if (plan?.spentResearch) {
+				// Charged on the round that used it, not on the act itself: the
+				// allowance is about how a *branch* is allowed to make progress.
+				current.research_budget = Math.max(0, researchBudgetOf(current, env.config.plan.research_budget) - 1);
+			}
+			// A plan is not finished by a round succeeding. It goes back in the
+			// queue and is asked again once this batch has landed — that revisit,
+			// with the results readable on disk, is the entire point of the design.
+			// Only a round that adds nothing closes it.
+			if (planning && !plan?.finished) {
+				current.status = "todo";
+				current.attempts = 0;
+				current.rejections = undefined;
+				if (env.store.loop.current === current.id) env.store.loop.current = "";
+				env.store.loop.last_failure = "";
+				persist();
+				if (!dryRun) await checkpoint(env, current, verdict.reason);
+				console.log(`✓ ${current.id} planned — ${verdict.reason}`);
+				continue;
+			}
+
 			markDone(env.store, current, verdict.reason);
 			persist();
 			if (!dryRun) await checkpoint(env, current, current.summary ?? "");
@@ -681,14 +720,24 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 		const attempts = recordFailure(env.store, current, verdict.reason);
 		console.error(`✗ ${current.id} rejected (attempt ${attempts}/${env.config.verify.max_attempts}): ${verdict.reason}`);
 
-		// A breakdown that was cut off left part of a plan in the queue. Those
-		// children are not salvage — each one looks fine alone, and nothing
-		// downstream can tell that the rest are missing. Only on a timeout: a
-		// breakdown the verifier rejected on its merits finished, and its retry
-		// prompt says accepted children stay.
-		if (result.timedOut && decomposing) {
-			const dropped = discardChildren(env.store, current.id);
-			if (dropped.length) console.error(`  discarded ${dropped.length} child item(s) from the truncated breakdown`);
+		// A round that was cut off left part of a batch in the queue. Those items
+		// are not salvage — each one looks fine alone, and nothing downstream can
+		// tell that the rest are missing. Only on a timeout: a round the check
+		// rejected on its merits finished, and its retry prompt says accepted
+		// items stay.
+		//
+		// Under re-entrancy this must only discard what *this* round wrote. The
+		// earlier rounds' children are all done — that is what made the plan ready
+		// again — so the unfinished ones are exactly this round's, and dropping a
+		// completed subtree would delete shipped work.
+		if (result.timedOut && planning) {
+			const dropped: string[] = [];
+			for (const child of unfinishedChildren(current.id, env.store.tasks)) {
+				dropped.push(...discardChildren(env.store, child.id));
+				env.store.tasks = env.store.tasks.filter((row) => row.id !== child.id);
+				dropped.push(child.id);
+			}
+			if (dropped.length) console.error(`  discarded ${dropped.length} item(s) from the truncated round`);
 		}
 
 		// Undo the rejected attempt. This runs before any persist() below so the
@@ -707,12 +756,12 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 		if (
 			env.config.atomic.on_overflow === "promote" &&
 			current.overflowed &&
-			levelOf(current) === "task" &&
-			assignmentFor(current) === "implement"
+			assignmentFor(current) === "act"
 		) {
-			promoteToScope(env.store, current, `Promoted to scope: ${current.overflow_reason ?? "over budget"}`);
+			promoteToPlan(env.store, current, `Promoted to plan: ${current.overflow_reason ?? "over budget"}`);
+			current.research_budget = researchBudgetOf(current, env.config.plan.research_budget);
 			persist();
-			console.error(`↑ ${current.id} promoted to scope — ${current.overflow_reason}; it will be broken down next`);
+			console.error(`↑ ${current.id} promoted to plan — ${current.overflow_reason}; its next steps get decided next`);
 			continue;
 		}
 

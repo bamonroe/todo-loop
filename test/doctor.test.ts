@@ -110,48 +110,51 @@ test("formatting marks each level", () => {
 	assert.equal(text, "✓ a: fine\n! b: hmm\n✗ c: no");
 });
 
-test("an explicit task owning children is a hard failure", () => {
+test("an explicit act owning children is a hard failure", () => {
 	const checks = auditQueue(
 		parseStore(`
 [[task]]
 id = "api"
 title = "Build the API"
-level = "task"
+level = "act"
 [[task]]
 id = "api.route"
 title = "Add GET /health returning 200"
 detail = "Register the route in src/server.ts and return a JSON body with status and uptime."
 `),
 	);
-	assert.equal(levelOf(checks, "tasks with children"), "fail");
+	assert.equal(levelOf(checks, "acts with children"), "fail");
 });
 
-test("a scope spawning a scope is a hard failure", () => {
+test("a plan spawning a plan is no longer a violation", () => {
+	// Under the old ladder this was the shape that could not be expressed, so
+	// deferral had nowhere to go below a scope. Nesting is unbounded now;
+	// termination comes from planners running out of next steps instead.
 	const checks = auditQueue(
 		parseStore(`
 [[task]]
 id = "sessions"
 title = "Rework session storage"
-level = "scope"
+level = "plan"
 [[task]]
 id = "sessions.cookies"
 title = "Investigate the cookie flags"
-level = "scope"
+level = "plan"
 `),
 	);
-	assert.equal(levelOf(checks, "level violations"), "fail");
+	assert.equal(levelOf(checks, "level violations"), undefined);
 });
 
-test("pending breakdowns are reported, not warned about", () => {
+test("a plan with no round yet is reported, not warned about", () => {
 	const checks = auditQueue(
 		parseStore(`
 [[task]]
 id = "auth"
 title = "Rebuild authentication"
-level = "epic"
+level = "plan"
 `),
 	);
-	assert.equal(levelOf(checks, "pending breakdowns"), "ok");
+	assert.equal(levelOf(checks, "plans with no round yet"), "ok");
 });
 
 test("tasks that ran over budget are surfaced", () => {

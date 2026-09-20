@@ -39,24 +39,65 @@ export type { TaskStatus } from "./schema.ts";
 export type { LoopState } from "./sidecar.ts";
 
 /**
- * How big an item is, and therefore what "working" it means.
+ * What kind of item this is — and therefore what "working" it means.
  *
- * An epic spawns scopes, a scope spawns tasks, a task spawns code. Only the
- * bottom level is ever implemented; the two above it produce queue entries and
- * are forbidden from touching the tree (see src/decompose.ts).
+ * Not a size. The old ladder (epic spawns scopes, scope spawns tasks) encoded
+ * *depth*, which forced the first session to scope an entire project before any
+ * of it existed. Three real runs spent 80% of their output tokens on that one
+ * up-front design and never once used the deferral level they were given.
+ *
+ * So a level says what a session does, not how big it is:
+ *
+ * - **`act`** — one session, one diff, one verdict. The only kind that writes.
+ * - **`plan`** — one session that decides the next few things and writes them to
+ *   the queue. Touches no files; a non-empty diff rejects the round outright.
+ *
+ * A plan may spawn either kind, so nesting is unbounded. Termination stops
+ * coming from a depth cap and starts coming from a planner that runs out of next
+ * steps — see `isReady` for the re-entrancy that makes that the live question.
  */
-export type TaskLevel = "task" | "scope" | "epic";
+export type TaskLevel = "act" | "plan";
 
-/** What the loop should do when it picks this item up. */
-export type Assignment = "implement" | "decompose";
+/**
+ * What an act produces. The verb is load-bearing rather than decorative: a
+ * planning round must contain at least one act, and `research` counts towards
+ * that only while the branch still has allowance left (see src/plan.ts).
+ * Without the distinction, "go and find out about X" is an infinitely renewable
+ * excuse to never write anything.
+ */
+export type ActKind = "code" | "docs" | "research";
+
+/** What the loop should do when it picks this item up. Identical to its level. */
+export type Assignment = TaskLevel;
 
 export interface Task {
 	id: string;
 	title: string;
 	detail?: string;
 	parent?: string;
-	/** Defaults to "task" — an item without a level is atomic work. */
+	/** Defaults to "act" — an item without a level is work, not planning. */
 	level?: TaskLevel;
+	/**
+	 * The word the file itself used for this level, when it is not one of ours.
+	 *
+	 * `epic` and `scope` both read as `plan`, but the project schema states the
+	 * level on every row and that file belongs to someone else — rewriting their
+	 * vocabulary on a save would edit data the loop was only passing through.
+	 * Read as a translation, written back verbatim. Cleared the moment the loop
+	 * actually changes the level, because then it is no longer what the file said.
+	 */
+	level_raw?: string;
+	/** For an act, what it produces. Absent means `code`. Meaningless on a plan. */
+	kind?: ActKind;
+	/**
+	 * Rounds this branch may still close using research alone.
+	 *
+	 * Inherited from the parent plan at creation rather than reset, which is the
+	 * whole point: a planner that has spent its allowance cannot refill it by
+	 * spawning a sub-planner to keep reading. That is the first move a model
+	 * looking for more research would find.
+	 */
+	research_budget?: number;
 	status: TaskStatus;
 	attempts: number;
 	summary?: string;
@@ -114,7 +155,9 @@ export const DEFAULT_STORE_FILE = "todo.toml";
 /** Task files the loop will adopt without being told, most specific first. */
 export const STORE_CANDIDATES = ["TODO.toml", "todo.toml"];
 
-const LEVELS: TaskLevel[] = ["task", "scope", "epic"];
+const LEVELS: TaskLevel[] = ["act", "plan"];
+
+const ACT_KINDS: ActKind[] = ["code", "docs", "research"];
 
 /** Keys the loop owns. Under a schema with a sidecar, none of them may touch the task file. */
 const BOOKKEEPING = [
@@ -129,7 +172,10 @@ const BOOKKEEPING = [
 ];
 
 /** Keys `Task` models directly, and which therefore never belong in `extra`. */
-const MODELLED = ["id", "title", "status", "level", "parent", ...BOOKKEEPING];
+const MODELLED = ["id", "title", "status", "level", "kind", "research_budget", "parent", ...BOOKKEEPING];
+
+/** Level words the loop understands as its own and therefore never preserves verbatim. */
+const OWN_LEVELS = new Set<string>(LEVELS);
 
 /** Dropped when a task is archived — they rank active work and mean nothing once it has shipped. */
 const RANKING_KEYS = ["order", "urgency"];
@@ -150,53 +196,76 @@ function asNumber(value: unknown, fallback = 0): number {
 }
 
 function asLevel(value: unknown): TaskLevel {
-	const raw = asString(value, "task").trim().toLowerCase();
-	return LEVELS.includes(raw as TaskLevel) ? (raw as TaskLevel) : "task";
+	const raw = asString(value, "act").trim().toLowerCase();
+	// Queues written against the old ladder still parse: the two container levels
+	// become plans, and anything else is work.
+	if (raw === "epic" || raw === "scope") return "plan";
+	if (raw === "task") return "act";
+	return LEVELS.includes(raw as TaskLevel) ? (raw as TaskLevel) : "act";
 }
 
-/** An absent level means "task"; callers should never branch on undefined. */
+function asActKind(value: unknown): ActKind {
+	const raw = asString(value, "code").trim().toLowerCase();
+	return ACT_KINDS.includes(raw as ActKind) ? (raw as ActKind) : "code";
+}
+
+/** An absent level means "act"; callers should never branch on undefined. */
 export function levelOf(task: Task): TaskLevel {
-	return task.level ?? "task";
+	return task.level ?? "act";
+}
+
+/** An absent kind means "code". Only meaningful on an act. */
+export function kindOf(task: Task): ActKind {
+	return task.kind ?? "code";
 }
 
 /**
  * Level, allowing for queues written before levels existed.
  *
  * An item with children is a container whatever it calls itself — that is what a
- * parent has always been here, and treating one as a scope keeps every existing
- * dotted-id queue valid without an edit. Only an *explicit* `level = "task"`
+ * parent has always been here, and treating one as a plan keeps every existing
+ * dotted-id queue valid without an edit. Only an *explicit* `level = "act"`
  * with children is a contradiction, because someone wrote it down on purpose.
  */
 export function effectiveLevel(task: Task, tasks: Task[]): TaskLevel {
 	if (task.level) return task.level;
-	return childrenOf(task.id, tasks).length ? "scope" : "task";
+	return childrenOf(task.id, tasks).length ? "plan" : "act";
 }
 
 /**
  * What working this item means. Decided by level alone, deliberately.
  *
- * It cannot also depend on whether the item has children: a breakdown *creates*
- * children, so a predicate that flips once the first one lands would refuse the
- * second. Selection already guarantees this is only asked about leaves, because
- * nextLeaf never returns an item that has children.
+ * It cannot also depend on whether the item has children: a planning round
+ * *creates* children, so a predicate that flips once the first one lands would
+ * refuse the second — and under re-entrancy a plan is handed back repeatedly
+ * with its previous rounds still hanging off it.
  */
 export function assignmentFor(task: Task): Assignment {
-	return levelOf(task) === "task" ? "implement" : "decompose";
+	return levelOf(task);
 }
 
-/**
- * A scope or epic that nobody has broken down yet. The display and audit
- * question, as opposed to the "what do I do now" question above.
- */
-export function needsBreakdown(task: Task, tasks: Task[]): boolean {
-	return levelOf(task) !== "task" && isLeaf(task, tasks);
+/** A plan nobody has run a round on yet. The display and audit question. */
+export function needsPlanning(task: Task, tasks: Task[]): boolean {
+	return levelOf(task) === "plan" && isLeaf(task, tasks);
 }
 
-/** Which levels a given level is allowed to spawn. An epic never spawns code directly. */
+/** Which levels a given level is allowed to spawn. An act never spawns anything. */
 export function allowedChildLevels(level: TaskLevel): TaskLevel[] {
-	if (level === "epic") return ["scope", "task"];
-	if (level === "scope") return ["task"];
-	return [];
+	return level === "plan" ? ["act", "plan"] : [];
+}
+
+/** How deep this task sits. The root is 0. Cycles stop the walk rather than hang it. */
+export function depthOf(task: Task, tasks: Task[]): number {
+	let depth = 0;
+	const seen = new Set<string>([task.id]);
+	let cursor = parentOf(task, tasks);
+	while (cursor && !seen.has(cursor)) {
+		seen.add(cursor);
+		depth += 1;
+		const parent = tasks.find((row) => row.id === cursor);
+		cursor = parent ? parentOf(parent, tasks) : undefined;
+	}
+	return depth;
 }
 
 /**
@@ -262,7 +331,13 @@ function readTask(raw: TomlTable, schema: Schema, archived: boolean): Task | und
 	if (detail) task.detail = detail;
 	const parent = asString(raw.parent);
 	if (parent) task.parent = parent;
-	if (raw.level !== undefined) task.level = asLevel(raw.level);
+	if (raw.level !== undefined) {
+		task.level = asLevel(raw.level);
+		const word = asString(raw.level).trim();
+		if (word && !OWN_LEVELS.has(word.toLowerCase())) task.level_raw = word;
+	}
+	if (raw.kind !== undefined) task.kind = asActKind(raw.kind);
+	if (typeof raw.research_budget === "number") task.research_budget = Math.max(0, Math.trunc(raw.research_budget));
 	if (raw.overflowed === true) task.overflowed = true;
 	const overflowReason = asString(raw.overflow_reason);
 	if (overflowReason) task.overflow_reason = overflowReason;
@@ -338,7 +413,7 @@ export function parseStore(text: string, options: ParseOptions = {}): Store {
 			file: options.archiveFile ?? "",
 		};
 		// Archived tasks join the same array. They are `done`, so selection skips
-		// them, but every question about the *tree* — has this scope been broken
+		// them, but every question about the *tree* — has this plan had a round
 		// down, is this parent finished — is wrong without them.
 		store.tasks.push(...tasksIn(archiveDoc, schema, true));
 	}
@@ -395,8 +470,13 @@ function taskTable(task: Task, schema: Schema): TomlTable {
 
 	// The project schema states the level on every task; the native one leaves
 	// the default unwritten. Either way an explicit level is never dropped.
-	if (schema.name === "project") values.level = levelOf(task);
-	else setOrDelete(values, "level", task.level && task.level !== "task" ? task.level : undefined);
+	const levelWord = task.level_raw ?? levelOf(task);
+	if (schema.name === "project") values.level = levelWord;
+	else setOrDelete(values, "level", task.level_raw ?? (task.level && task.level !== "act" ? task.level : undefined));
+	// Only ever written when it is not the default, so an ordinary code act stays
+	// a three-line row.
+	setOrDelete(values, "kind", task.kind && task.kind !== "code" ? task.kind : undefined);
+	setOrDelete(values, "research_budget", levelOf(task) === "plan" ? task.research_budget : undefined);
 
 	if (schema.sidecar) {
 		for (const key of BOOKKEEPING) {
@@ -572,7 +652,7 @@ function byRank(a: Task, b: Task): number {
  *
  * A ranked schema states its priority in fields, and states it *flat* — parents
  * and children sit wherever they were appended — so the tree has to be rebuilt
- * and walked depth-first, ranking siblings at each level. Finishing one scope
+ * and walked depth-first, ranking siblings at each level. Finishing one branch
  * beats starting nine.
  *
  * An unranked schema already keeps the array in priority order and inserts
@@ -634,26 +714,40 @@ export function unmetBlockers(task: Task, tasks: Task[]): string[] {
 	});
 }
 
-/** True when a task can be started: it is a leaf, it is open, and nothing gates it. */
+/**
+ * True when an item can be started now.
+ *
+ * An act is startable while it is a childless leaf, as before. A **plan is
+ * re-entrant**: it becomes startable again every time its whole batch has
+ * landed, and is handed back the record of what just got done so the next round
+ * is decided against a repository that now contains it. That is the entire
+ * mechanism — a planner never designs against work that does not exist yet,
+ * because it is only ever asked about the step immediately in front of it.
+ *
+ * A plan therefore does not close by having children. It closes when a round
+ * adds nothing, which is a planner saying the branch is finished; `rollup`
+ * deliberately refuses to complete one on its behalf.
+ */
 export function isReady(task: Task, tasks: Task[]): boolean {
 	if (task.status !== "todo" && task.status !== "doing") return false;
-	if (!isLeaf(task, tasks)) return false;
-	return unmetBlockers(task, tasks).length === 0;
+	if (unmetBlockers(task, tasks).length) return false;
+	const kids = childrenOf(task.id, tasks);
+	if (!kids.length) return true;
+	return levelOf(task) === "plan" && kids.every((kid) => kid.status === "done");
 }
 
 /**
- * Leftmost startable leaf. Interior nodes are never handed to the model —
- * a parent's work is its children, and prompting with one is how a bounded
- * task turns into a forty-turn run.
+ * Leftmost startable item — the leftmost open act, or a plan whose batch has
+ * finished and which is therefore due another round.
  *
- * A leaf whose `blocked_by` is not satisfied is skipped rather than blocking the
- * queue behind it, so declaring a dependency reorders work instead of stopping
- * it. The loop is otherwise perfectly willing to build something correct for a
- * state the program cannot reach: the verifier is asked whether the diff does
- * what the task said, which it will, and nobody is asked whether the task was
- * worth doing yet.
+ * An item whose `blocked_by` is not satisfied is skipped rather than blocking
+ * the queue behind it, so declaring a dependency reorders work instead of
+ * stopping it. The loop is otherwise perfectly willing to build something
+ * correct for a state the program cannot reach: the verifier is asked whether
+ * the diff does what the task said, which it will, and nobody is asked whether
+ * the task was worth doing yet.
  */
-export function nextLeaf(store: Store): Task | undefined {
+export function nextReady(store: Store): Task | undefined {
 	return workingOrder(store).find((task) => isReady(task, store.tasks));
 }
 
@@ -668,11 +762,46 @@ export function blockedLeaves(store: Store): { task: Task; waitingOn: string[] }
 	const out: { task: Task; waitingOn: string[] }[] = [];
 	for (const task of workingOrder(store)) {
 		if (task.status !== "todo" && task.status !== "doing") continue;
-		if (!isLeaf(task, store.tasks)) continue;
+		if (childrenOf(task.id, store.tasks).length && levelOf(task) !== "plan") continue;
 		const waitingOn = unmetBlockers(task, store.tasks);
 		if (waitingOn.length) out.push({ task, waitingOn });
 	}
 	return out;
+}
+
+/**
+ * The children a planning round just added.
+ *
+ * Not tracked with a snapshot, because it does not need to be: a plan only
+ * becomes ready again once every existing child is done, so anything under it
+ * that is *not* done was written by the round being judged. The invariant lives
+ * in `isReady`, and this reads it back out.
+ */
+export function unfinishedChildren(id: string, tasks: Task[]): Task[] {
+	return childrenOf(id, tasks).filter((child) => child.status !== "done");
+}
+
+/**
+ * What this branch has already finished, oldest first, most recent last.
+ *
+ * The context a re-entered plan is handed instead of the whole design. A
+ * planner that can see the last few things that landed is deciding the next
+ * step against work that exists; one that cannot is guessing, which is the
+ * failure the old up-front breakdown made unavoidable.
+ */
+export function recentlyCompleted(store: Store, id: string, limit = 5): Task[] {
+	const done = childrenOf(id, store.tasks).filter((child) => child.status === "done");
+	return done.slice(Math.max(0, done.length - limit));
+}
+
+/**
+ * Rounds this plan may still close with research alone.
+ *
+ * Absent means the configured default has not been stamped on yet, which is the
+ * case for the root and for any queue written by hand.
+ */
+export function researchBudgetOf(task: Task, fallback: number): number {
+	return task.research_budget ?? fallback;
 }
 
 /**
@@ -733,6 +862,18 @@ export function discardChildren(store: Store, parentId: string): string[] {
  */
 export function insertChildren(store: Store, parentId: string, children: Task[]): void {
 	if (!children.length) return;
+	// Acts first, plans after, each group in the order it was written.
+	//
+	// The "every round must land at least one act" rule is a property of the
+	// *data* until this runs. Left in emission order, a round of [plan, plan,
+	// act] dives into the first plan, which emits its own batch, and so on — the
+	// act sits at the bottom of a subtree and might not run for hours. Ordering
+	// it ahead of its plan siblings is what turns the rule into a heartbeat:
+	// every planning round is followed immediately by something landing on disk.
+	children = [
+		...children.filter((child) => levelOf(child) !== "plan"),
+		...children.filter((child) => levelOf(child) === "plan"),
+	];
 	const parent = findTask(store, parentId);
 	if (!parent) {
 		store.tasks.push(...children);
@@ -753,6 +894,11 @@ export function rollup(store: Store): void {
 		for (const task of [...store.tasks]) {
 			const kids = childrenOf(task.id, store.tasks);
 			if (kids.length === 0) continue;
+			// A plan is never finished on its children's behalf. Its batch being
+			// done is what makes it *ready* again, not what makes it complete —
+			// closing it here would end the branch at round one and delete the
+			// revisit step the whole design turns on.
+			if (levelOf(task) === "plan") continue;
 			if (kids.every((kid) => kid.status === "done") && task.status !== "done") {
 				markDone(store, task, task.summary ?? `All ${kids.length} subtasks complete.`, false);
 				changed = true;
@@ -772,7 +918,7 @@ export function counts(store: Store): Record<TaskStatus | "leaves" | "pending_br
 		if (isLeaf(task, store.tasks)) out.leaves += 1;
 		// "How much of this queue is still an open question?" — the number worth
 		// knowing before trusting a long run to it.
-		if (task.status !== "done" && needsBreakdown(task, store.tasks)) out.pending_breakdowns += 1;
+		if (task.status !== "done" && needsPlanning(task, store.tasks)) out.pending_breakdowns += 1;
 	}
 	return out as Record<TaskStatus | "leaves" | "pending_breakdowns", number>;
 }
@@ -783,6 +929,9 @@ export interface NewTask {
 	detail?: string;
 	parent?: string;
 	level?: TaskLevel;
+	kind?: ActKind;
+	/** Rounds this branch may still close with research alone. Plans only. */
+	research_budget?: number;
 	/** Project-schema metadata. Ignored by a schema that has no field for it. */
 	category?: string;
 	urgency?: string;
@@ -813,6 +962,10 @@ export function createTask(store: Store, fields: NewTask): Task {
 	if (fields.detail) task.detail = fields.detail;
 	if (fields.parent) task.parent = fields.parent;
 	if (fields.level) task.level = fields.level;
+	if (fields.level !== "plan" && fields.kind) task.kind = fields.kind;
+	if (fields.level === "plan" && fields.research_budget !== undefined) {
+		task.research_budget = Math.max(0, Math.trunc(fields.research_budget));
+	}
 
 	if (store.schema.name === "project") {
 		task.extra = {
@@ -896,12 +1049,15 @@ export function markOverflow(task: Task, reason: string): void {
 }
 
 /**
- * Turn a task that proved too big into a scope, so the next pass breaks it down
- * instead of retrying the same oversized prompt. Attempts reset — the task was
- * never atomic, so the failed attempts were not the worker's fault.
+ * Turn an act that proved too big into a plan, so the next pass decides what its
+ * next few steps actually are instead of retrying the same oversized prompt.
+ * Attempts reset — the act was never atomic, so the failures were not the
+ * worker's fault.
  */
-export function promoteToScope(store: Store, task: Task, reason: string): void {
-	task.level = "scope";
+export function promoteToPlan(store: Store, task: Task, reason: string): void {
+	task.level = "plan";
+	task.level_raw = undefined;
+	task.kind = undefined;
 	task.status = "todo";
 	task.attempts = 0;
 	task.reason = reason;
@@ -943,8 +1099,8 @@ export function renderTree(store: Store, options: TreeOptions = {}): string {
 		const indent = "  ".repeat(depth(task));
 		const attempts = task.attempts > 0 && task.status !== "done" ? ` (${task.attempts} attempts)` : "";
 		const reason = task.status === "blocked" && task.reason ? ` — ${task.reason}` : "";
-		const level = levelOf(task) === "task" ? "" : ` [${levelOf(task)}]`;
-		const pending = needsBreakdown(task, store.tasks) ? " — needs breaking down" : "";
+		const level = levelOf(task) === "plan" ? " [plan]" : kindOf(task) === "code" ? "" : ` [${kindOf(task)}]`;
+		const pending = task.status !== "done" && needsPlanning(task, store.tasks) ? " — not yet planned" : "";
 		const over = task.overflowed ? " ⚠ too coarse" : "";
 		const shipped = task.archived ? " (archived)" : "";
 		const waiting = task.archived ? [] : unmetBlockers(task, store.tasks);

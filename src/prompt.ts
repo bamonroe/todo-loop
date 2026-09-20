@@ -3,7 +3,17 @@
  * restating the harness is a token not spent on the task.
  */
 
-import { allowedChildLevels, assignmentFor, findTask, levelOf, parentOf, type Store, type Task } from "./store.ts";
+import {
+	assignmentFor,
+	depthOf,
+	findTask,
+	kindOf,
+	levelOf,
+	parentOf,
+	recentlyCompleted,
+	type Store,
+	type Task,
+} from "./store.ts";
 
 /** Parent titles, root first. A leaf without its ancestors reads as a non sequitur. */
 export function ancestryOf(store: Store, task: Task): string[] {
@@ -28,10 +38,16 @@ export interface PromptOptions {
 	rejections?: string[];
 	attempts?: number;
 	maxAttempts?: number;
-	/** Files a leaf task may touch before it counts as too coarse. */
+	/** Files an act may touch before it counts as too coarse. */
 	maxFiles?: number;
-	/** Smallest accepted breakdown. */
-	minChildren?: number;
+	/** Most items one planning round may add. */
+	maxChildren?: number;
+	/** Rounds this branch may still close with research alone. */
+	researchBudget?: number;
+	/** Nesting backstop; at the cap a round may add acts only. */
+	maxDepth?: number;
+	/** Where research acts write what they find, so the next session can read it. */
+	memoryFile?: string;
 	/**
 	 * The same build and test commands the verifier will run. Handing them to the
 	 * worker is what turns a blind session into one with a compiler.
@@ -64,114 +80,180 @@ function rejectionBlock(heading: string, options: PromptOptions, closing: string
 	return lines.join("\n");
 }
 
-/** "a scope" but "an epic" — the level is interpolated into prose all over this file. */
-function article(level: string): string {
-	return `${/^[aeiou]/i.test(level) ? "an" : "a"} ${level}`;
-}
-
 /**
- * The bar a child task has to clear.
+ * The bar an act has to clear.
  *
  * Written as tests the model can actually apply rather than an adjective. "Keep
  * it small" is unfalsifiable; "name the files it touches" either succeeds or it
- * does not, and a scope that fails it is still a scope.
+ * does not, and something that fails it is a plan rather than a failure.
  */
 function atomicityRules(maxFiles: number): string {
 	return [
-		"## What makes a task atomic",
-		`Every task you create must be finishable by one worker, in one session, with no memory of this one. That is a hard constraint — the worker will see only the task text you write, not this conversation.`,
+		"## What makes an act atomic",
+		"Every act you create must be finishable by one worker, in one session, with no memory of this one. That is a hard constraint — the worker will see only the text you write, not this conversation.",
 		"",
-		"Apply these tests to each task before you add it:",
-		`- **Name the files, from what is on disk now.** If naming them means first deciding a design, it is not a task — make it a scope.`,
+		"Apply these tests to each act before you add it:",
+		"- **Name the files, from what is on disk now.** If naming them means first deciding a design, it is not an act — make it a plan.",
 		`- **Count them.** More than ${maxFiles} files means it is too big. Split it.`,
-		"- **One sentence of intent.** If describing the change needs \"and\", it is two tasks.",
-		"- **Self-contained.** The worker cannot ask questions. Anything it needs — a file path, a function name, a format, a constraint — goes in the task detail or it does not exist.",
-		"- **Verifiable from the diff alone.** A reviewer who sees only the diff and the task text must be able to tell whether it was done.",
+		'- **One sentence of intent.** If describing the change needs "and", it is two acts.',
+		"- **Self-contained.** The worker cannot ask questions. Anything it needs — a file path, a command, a format, a constraint — goes in the detail or it does not exist.",
+		"- **Verifiable from the diff alone.** A reviewer who sees only the diff and the text must be able to tell whether it was done.",
 		"",
-		"Err on the side of smaller. Two tasks that are too small cost one extra session; one task that is too big fails verification repeatedly and stalls the queue.",
+		"Err on the side of smaller. Two acts that are too small cost one extra session; one act that is too big fails verification repeatedly and stalls the queue.",
 	].join("\n");
 }
 
 /**
- * Prompt for a scope or an epic: enumerate children, touch nothing else.
+ * What this branch has already delivered.
+ *
+ * The single most important block in the prompt, and the reason the whole
+ * hierarchy was rewritten. A planner that can read the last few things that
+ * landed is deciding the next step against a repository that contains them. The
+ * old up-front breakdown had nothing to read — it designed an entire
+ * application, interfaces and all, against an empty directory, and spent 82% of
+ * its output tokens doing it. That was not a prompting failure. It was being
+ * asked a question that had no available answer.
+ */
+function progressBlock(store: Store, task: Task): string {
+	const done = recentlyCompleted(store, task.id, 5);
+	if (!done.length) {
+		return [
+			"## What has been done so far",
+			"Nothing yet. This is the first round on this item, so the repository is however you find it — look before you decide.",
+		].join("\n");
+	}
+	return [
+		"## What has been done so far",
+		"The most recently finished steps under this item, oldest first. This is what is now on disk; decide the next steps against it, not against what you would have planned before it existed.",
+		"",
+		...done.map((row) => `- ${row.id}: ${row.title}${row.summary ? ` — ${row.summary.trim()}` : ""}`),
+	].join("\n");
+}
+
+/**
+ * The progress rule, stated with its current allowance filled in.
+ *
+ * The allowance is named out loud rather than left as a silent gate. A model
+ * that is told it has one research round left can choose to spend it on the
+ * right question; one that only discovers the rule by being rejected spends a
+ * whole session finding out.
+ */
+function progressRule(budget: number, memoryFile?: string): string {
+	const lines = [
+		"## Every round must land at least one act",
+		"A round that adds only plans is rejected. Planning that spawns more planning always feels productive and never risks a failing build, which is exactly why it is a gate and not a suggestion — something has to get written down each time round.",
+	];
+	if (budget > 0) {
+		lines.push(
+			"",
+			`If there is genuinely nothing to build yet, a \`research\` act satisfies the rule: go and find something out, and write what you learn${memoryFile ? ` into \`${memoryFile}\`` : " down"} so the next session does not pay to rediscover it. **This branch may do that ${budget} more time(s).**`,
+			"After that, a round has to include an act that writes to the repository itself.",
+		);
+	} else {
+		lines.push(
+			"",
+			"**This branch has used its research allowance.** A round of research alone will now be rejected — this round needs an act that writes code or documentation into the repository. If you still feel under-informed, pick the smallest thing you can build with what you already know and build that; the next round gets to read the result.",
+		);
+	}
+	return lines.join("\n");
+}
+
+/**
+ * The prompt for a plan: decide the next few steps, write them down, stop.
  *
  * The instruction not to write code is backed by a mechanical check — a
- * non-empty diff rejects the breakdown — so this is a description of the gate
+ * non-empty diff rejects the round — so this is a description of the gate
  * rather than a plea.
  */
-export function renderDecomposePrompt(store: Store, task: Task, options: PromptOptions): string {
-	const level = levelOf(task);
-	const allowed = allowedChildLevels(level);
-	const minChildren = options.minChildren ?? 2;
+export function renderPlanPrompt(store: Store, task: Task, options: PromptOptions): string {
+	const maxChildren = options.maxChildren ?? 5;
 	const maxFiles = options.maxFiles ?? 5;
+	const budget = options.researchBudget ?? 2;
+	const depth = depthOf(task, store.tasks);
+	const atDepthCap = depth + 1 >= (options.maxDepth ?? 8);
+	const hasDone = recentlyCompleted(store, task.id, 1).length > 0;
 	const parts: string[] = [];
 	const chain = ancestryOf(store, task);
 
 	if (chain.length) parts.push(`Working within: ${chain.join(" › ")}`);
-	parts.push(`# ${level === "epic" ? "Epic" : "Scope"} ${task.id}\n\n${task.title}`);
+	parts.push(`# Plan ${task.id}\n\n${task.title}`);
 	if (task.detail) parts.push(task.detail.trim());
+
+	parts.push(progressBlock(store, task));
 
 	parts.push(
 		[
 			"## Your job",
-			`This is ${article(level)}, not a task. You are **not** implementing it. You are breaking it down.`,
+			`You are **not** implementing this and you are **not** designing the whole of it. One question only: **what are the next ${maxChildren} things that need doing to move this forward?**`,
 			"",
-			"1. **Investigate first.** Read the code this touches — the files, the existing patterns, what is already there. A breakdown written without looking at the repository invents work that does not need doing and misses work that does.",
-			level === "epic"
-				? `2. **Then enumerate, one at a time.** Add at least ${minChildren} child items covering everything this epic needs.`
-				: `2. **Then enumerate, one at a time.** Add a child item for each piece of work this scope turns out to need. If it turns out to be a single atomic task, add exactly that one task — that is a real answer, not a failure.`,
+			"Fewer than that is fine — and better than padding. You will be asked again after these are done, with the results in front of you, so anything you cannot decide well right now is not lost. It is simply not this round's question.",
 			"",
-			"**Add each child the moment you decide it. Do not plan them all first.** Decide one, write it, then think about the next. Planning the whole structure before writing anything means holding every child in your head at once, re-deciding earlier ones as later ones change — and if this session ends early, everything you worked out is lost while a written child is already safe.",
-			"Keep the deliberation per child short. If deciding one takes long, that is the signal it should be a scope, not that it needs more thought here.",
+			"1. **Look first.** Read what is actually on disk — the files, the tooling, what the last steps left behind. A round decided without looking invents work that does not need doing and misses work that does.",
+			"2. **Then write them down, one at a time.** Add each item the moment you decide it. Do not work them all out first: planning the whole batch before writing anything means holding every item in your head at once and re-deciding earlier ones as later ones change, and if this session ends early everything you worked out is lost while a written item is already safe.",
 			"",
-			`Write no code. Change no files. The breakdown is rejected automatically if the working tree changes — ${article(level)} produces queue entries, nothing else.`,
+			"Keep the deliberation per item short. If deciding one takes long, that is the signal it should be a plan, not that it needs more thought here.",
+			"",
+			"Write no code. Change no files. The round is rejected automatically if the working tree changes — a plan produces queue entries, nothing else.",
 		].join("\n"),
 	);
 
 	parts.push(
 		[
-			"## What the children may be",
-			allowed.includes("scope")
-				? `- \`task\` — you can name the files it touches **right now**, from what is on disk today.\n- \`scope\` — anything else. It gets its own session later, which breaks it down with the earlier work already written and readable.\n\nPrefer \`scope\` whenever naming the files would mean deciding a design first. Deferring is not an admission that you could not work it out — a design decided now, against a repository that does not contain the earlier tasks' code yet, is a guess. The same decision made later is made by someone who can read that code. A guess written into a task detail is the only context its worker will ever have, so a wrong one is expensive and silent.`
-				: `- \`task\` — atomic, implementable exactly as written (see below). A scope may only spawn tasks, so everything you add here must clear the bar below.`,
+			"## What you may add",
+			"- `act` — one session, one diff. Pick its kind:",
+			"  - `code` — writes or changes code.",
+			"  - `docs` — writes or changes documentation.",
+			options.memoryFile
+				? `  - \`research\` — finds something out and appends what it learned to \`${options.memoryFile}\`, where the next session can read it.`
+				: "  - `research` — finds something out and writes down what it learned.",
+			atDepthCap
+				? "\nYou are at the nesting cap, so this round may add acts only. Anything that feels too big has to be cut into acts you can name the files for."
+				: "- `plan` — anything you cannot yet name the files for. It gets its own session later, which decides it with the earlier work already written and readable.\n\nPrefer `plan` whenever naming the files would mean deciding a design first. Deferring is not an admission that you could not work it out — a design decided now, against a repository that does not contain the earlier steps' code yet, is a guess, and a guess written into an act's detail is the only context its worker will ever have. The same decision made two rounds from now is made by someone who can read that code.",
 			"",
-			"Order matters: add them in the order they should be worked. Later tasks may depend on earlier ones, never the reverse.",
+			"Order matters: add them in the order they should be worked. Later items may depend on earlier ones, never the reverse.",
 		].join("\n"),
 	);
 
+	parts.push(progressRule(budget, options.memoryFile));
 	parts.push(atomicityRules(maxFiles));
 
 	parts.push(
 		options.mode === "tool"
 			? [
 					"## How to add them",
-					"Call `todo_add` once per child — `title`, `detail`, and `level`. The parent is set for you.",
-					"Put everything the worker will need in `detail`. It is the only context that task will ever have.",
+					"Call `todo_add` once per item — `title`, `detail`, `level` (`act` or `plan`), and `kind` for an act. The parent is set for you.",
+					"Put everything the worker will need in `detail`. It is the only context that item will ever have.",
 					"",
 					"## Finishing",
-					"When every child is added, call `todo_complete` with a one-line summary of how you split it.",
-					`Only call \`todo_block\` if this ${level} genuinely cannot be broken down — missing information, a contradiction, a broken precondition. It halts the whole queue for a human, so it is not the way to say "this is smaller than it looked".`,
+					"When this round's items are written, call `todo_complete` with a one-line summary of what you decided and why.",
+					hasDone
+						? "If this item is genuinely finished — everything under it is done and there is no next step — add nothing at all and say so in the summary. An empty round is how a branch closes."
+						: "This is the first round, so it has to produce work: an empty round will be rejected.",
+					"Only call `todo_block` if you cannot plan at all — missing information, a contradiction, a broken precondition. It halts the whole queue for a human, so it is not the way to say \"this is smaller than it looked\".",
 				].join("\n")
 			: [
 					"## How to add them",
-					"Run, once per child:",
+					"Run, once per item:",
 					"",
 					"```",
-					`todo add <id> "<title>" --parent ${task.id} --level <task|scope> --detail "<everything the worker needs>"`,
+					`todo add <id> "<title>" --parent ${task.id} --level <act|plan> --kind <code|docs|research> --detail "<everything the worker needs>"`,
 					"```",
 					"",
-					"Put everything the worker will need in `--detail`. It is the only context that task will ever have.",
+					"Put everything the worker will need in `--detail`. It is the only context that item will ever have.",
 					"",
 					"## Finishing",
-					"When every child is added, stop. Your final message must be a one-line summary of how you split it.",
-					`Only say \`BLOCKED:\` if this ${level} genuinely cannot be broken down — missing information, a contradiction, a broken precondition. It halts the whole queue for a human, so it is not the way to say "this is smaller than it looked".`,
+					"When this round's items are written, stop. Your final message must be a one-line summary of what you decided and why.",
+					hasDone
+						? "If this item is genuinely finished — everything under it is done and there is no next step — add nothing at all and say so. An empty round is how a branch closes."
+						: "This is the first round, so it has to produce work: an empty round will be rejected.",
+					"Only say `BLOCKED:` if you cannot plan at all — missing information, a contradiction, a broken precondition. It halts the whole queue for a human.",
 				].join("\n"),
 	);
 
 	const rejected = rejectionBlock(
-		"Previous breakdown was rejected",
+		"Previous round was rejected",
 		options,
-		"Fix exactly what is listed. Children that were already accepted stay as they are.",
+		"Fix exactly what is listed. Items that were already accepted stay as they are.",
 	);
 	if (rejected) parts.push(rejected);
 
@@ -181,7 +263,7 @@ export function renderDecomposePrompt(store: Store, task: Task, options: PromptO
 /**
  * The other leaves under the same parent, titles and status only.
  *
- * Never their `detail`: the eight siblings of one real breakdown carried two to
+ * Never their `detail`: the eight siblings of one real round carried two to
  * three hundred words each, and pasting that into a small local window costs
  * more than the file read this is meant to replace.
  */
@@ -224,18 +306,34 @@ function verificationBlock(options: PromptOptions): string | undefined {
 	].join("\n");
 }
 
-export function renderTaskPrompt(store: Store, task: Task, options: PromptOptions): string {
+export function renderActPrompt(store: Store, task: Task, options: PromptOptions): string {
+	const kind = kindOf(task);
 	const parts: string[] = [];
 	const chain = ancestryOf(store, task);
 
 	if (chain.length) parts.push(`Working within: ${chain.join(" › ")}`);
-	parts.push(`# Task ${task.id}\n\n${task.title}`);
+	parts.push(`# ${kind === "research" ? "Research" : kind === "docs" ? "Documentation" : "Task"} ${task.id}\n\n${task.title}`);
 	if (task.detail) parts.push(task.detail.trim());
+
+	// A research act still has to leave a diff behind — the evidence check
+	// rejects an empty one. That is deliberate: "I went and read some things" is
+	// not a deliverable, and the next session cannot read a session that ended.
+	if (kind === "research" && options.memoryFile) {
+		parts.push(
+			[
+				"## This is a research act",
+				`You are finding something out, not building. The deliverable is what you write into \`${options.memoryFile}\` — append a short, dated section with what you learned and, where it matters, the exact commands or paths that worked.`,
+				"",
+				"Write it for a session that has never seen this repository and cannot ask you anything. Facts and commands, not narration. A finding nobody writes down is a finding the next worker pays to rediscover.",
+				"Do not change anything else.",
+			].join("\n"),
+		);
+	}
 
 	parts.push(
 		[
 			"## Scope",
-			"Do exactly this task. Do not start the next one, refactor beyond it, or fix unrelated problems you notice — note those instead and move on.",
+			"Do exactly this item. Do not start the next one, refactor beyond it, or fix unrelated problems you notice — note those instead and move on.",
 			`This task is meant to be atomic: roughly ${options.maxFiles ?? 5} files at most, finishable in this one session. If it turns out to be much larger than that, say so rather than pushing through — a task that does not fit is a queue bug, and reporting it is more useful than half-finishing it.`,
 		].join("\n"),
 	);
@@ -296,16 +394,16 @@ export function renderTaskPrompt(store: Store, task: Task, options: PromptOption
  */
 export function renderPinnedTask(store: Store, task: Task, lastFailure: string): string {
 	const chain = ancestryOf(store, task);
-	const decomposing = assignmentFor(task) === "decompose";
+	const planning = assignmentFor(task) === "plan";
 	const lines = [
-		decomposing ? "# Assigned breakdown (do not lose track of this)" : "# Assigned task (do not lose track of this)",
+		planning ? "# Assigned planning round (do not lose track of this)" : "# Assigned task (do not lose track of this)",
 		chain.length ? `Context: ${chain.join(" › ")}` : "",
-		`${task.id} [${levelOf(task)}]: ${task.title}`,
+		`${task.id} [${planning ? "plan" : kindOf(task)}]: ${task.title}`,
 		task.detail ? task.detail.trim() : "",
-		// The one thing a decomposing worker must not drift on: it is writing
-		// queue entries, not code, and the diff check will reject it if it does.
-		decomposing
-			? "You are breaking this down, not implementing it. Add child tasks with todo_add. Write no code — a non-empty diff rejects the breakdown."
+		// The one thing a planner must not drift on: it is writing queue entries,
+		// not code, and the diff check will reject it if it does.
+		planning
+			? "You are deciding the next few steps, not implementing them. Add them with todo_add. Write no code — a non-empty diff rejects the round."
 			: "",
 		lastFailure ? `\nMost recent verification failure:\n${lastFailure.trim()}` : "",
 		"",
@@ -315,11 +413,9 @@ export function renderPinnedTask(store: Store, task: Task, lastFailure: string):
 }
 
 /**
- * The prompt for whatever this item actually needs — implementation or a
- * breakdown. Callers pick the task; they should not have to pick the shape.
+ * The prompt for whatever this item actually needs — a planning round or the
+ * work itself. Callers pick the item; they should not have to pick the shape.
  */
 export function renderAssignmentPrompt(store: Store, task: Task, options: PromptOptions): string {
-	return assignmentFor(task) === "decompose"
-		? renderDecomposePrompt(store, task, options)
-		: renderTaskPrompt(store, task, options);
+	return assignmentFor(task) === "plan" ? renderPlanPrompt(store, task, options) : renderActPrompt(store, task, options);
 }

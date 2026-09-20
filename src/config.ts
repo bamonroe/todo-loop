@@ -58,16 +58,16 @@ export interface Config {
 		 */
 		worker_timeout_ms: number;
 		/**
-		 * Wall-clock cap on a breakdown session specifically, 0 for none.
+		 * Wall-clock cap on a planning round specifically, 0 for none.
 		 *
 		 * Separate from worker_timeout_ms because the two fail differently. An
 		 * implementation task that overruns is usually lost, and killing it is
-		 * cheap — the tree reverts and nothing is left behind. A breakdown that
+		 * cheap — the tree reverts and nothing is left behind. A round that
 		 * overruns has written part of a plan into the queue, and a partial plan
 		 * is worse than no plan: every task in it passes verification while the
 		 * missing ones are never noticed.
 		 */
-		decompose_timeout_ms: number;
+		plan_timeout_ms: number;
 		/**
 		 * A ladder of strictness, each rung doing what the one below it does:
 		 * "off" ignores git, "commit" auto-commits each verified task, and
@@ -83,13 +83,39 @@ export interface Config {
 		/** What to do when a run ends without the worker calling todo_complete. */
 		on_silent_stop: "halt" | "retry";
 	};
-	decompose: {
+	plan: {
 		/**
-		 * Smallest breakdown accepted. One child is a rename, not a breakdown; a
-		 * scope that really is a single atomic task should be blocked instead, and
-		 * the prompt says so.
+		 * Most items one planning round may add. The question a planner is asked is
+		 * "what are the next few things", and a cap is what keeps it that question
+		 * rather than "design the project".
 		 */
-		min_children: number;
+		max_children: number;
+		/**
+		 * How many rounds a branch may close using research alone before it has to
+		 * produce something that writes to the repository.
+		 *
+		 * Spent per branch, and *inherited* by child plans rather than reset, so a
+		 * planner cannot refill its allowance by spawning a sub-planner to keep
+		 * reading. Two is a guess; the run is what tells us whether it is wrong.
+		 */
+		research_budget: number;
+		/**
+		 * Backstop only. Nesting is meant to terminate because planners run out of
+		 * next steps, not because they hit a wall — but a plan that only ever
+		 * spawns plans would otherwise recurse forever, so at this depth a plan may
+		 * spawn acts and nothing else.
+		 */
+		max_depth: number;
+		/**
+		 * Where research acts write what they find.
+		 *
+		 * Every session re-explores the same environment otherwise — what the build
+		 * script wants, where the toolchain lives, which incantation actually
+		 * worked. One real run's discovery survived only because the model happened
+		 * to paste it into a task detail by hand. This is the file that makes
+		 * "research" a deliverable rather than a session that ends.
+		 */
+		memory_file: string;
 	};
 	atomic: {
 		/**
@@ -102,7 +128,7 @@ export interface Config {
 		 * What to do when a leaf task overruns its context budget.
 		 *
 		 * warn: record it on the task and surface it in status and doctor.
-		 * promote: turn it into a scope so the next pass breaks it down.
+		 * promote: turn it into a plan so the next pass decides its next steps.
 		 * off: ignore.
 		 */
 		on_overflow: "warn" | "promote" | "off";
@@ -182,13 +208,16 @@ export const DEFAULT_CONFIG: Config = {
 	loop: {
 		max_iterations: 50,
 		worker_timeout_ms: 0,
-		decompose_timeout_ms: 0,
+		plan_timeout_ms: 0,
 		checkpoint: "require-clean",
 		commit_prefix: "todo",
 		on_silent_stop: "halt",
 	},
-	decompose: {
-		min_children: 2,
+	plan: {
+		max_children: 5,
+		research_budget: 2,
+		max_depth: 8,
+		memory_file: "NOTES.md",
 	},
 	atomic: {
 		max_files: 5,
@@ -247,15 +276,17 @@ export function parseConfig(text: string): Config {
 	const models = section(doc, "models");
 	const verify = section(doc, "verify");
 	const loop = section(doc, "loop");
-	const decompose = section(doc, "decompose");
+	const plan = section(doc, "plan");
 	const atomic = section(doc, "atomic");
 	const context = section(doc, "context");
 	const ollama = section(doc, "ollama");
 
 	const workerTimeout = Math.max(0, pickNumber(loop, "worker_timeout_ms", DEFAULT_CONFIG.loop.worker_timeout_ms));
-	const decomposeTimeout = Math.max(
+	// `decompose_timeout_ms` was this key's name while the levels were a ladder.
+	// Still read, so an existing todoloop.toml does not silently lose its budget.
+	const planTimeout = Math.max(
 		0,
-		pickNumber(loop, "decompose_timeout_ms", DEFAULT_CONFIG.loop.decompose_timeout_ms),
+		pickNumber(loop, "plan_timeout_ms", pickNumber(loop, "decompose_timeout_ms", DEFAULT_CONFIG.loop.plan_timeout_ms)),
 	);
 	const checkpointRaw = pickString(loop, "checkpoint", DEFAULT_CONFIG.loop.checkpoint);
 	const checkpoint =
@@ -288,13 +319,16 @@ export function parseConfig(text: string): Config {
 		loop: {
 			max_iterations: pickNumber(loop, "max_iterations", DEFAULT_CONFIG.loop.max_iterations),
 			worker_timeout_ms: workerTimeout,
-			decompose_timeout_ms: decomposeTimeout,
+			plan_timeout_ms: planTimeout,
 			checkpoint,
 			commit_prefix: pickString(loop, "commit_prefix", DEFAULT_CONFIG.loop.commit_prefix),
 			on_silent_stop,
 		},
-		decompose: {
-			min_children: Math.max(1, pickNumber(decompose, "min_children", DEFAULT_CONFIG.decompose.min_children)),
+		plan: {
+			max_children: Math.max(1, pickNumber(plan, "max_children", DEFAULT_CONFIG.plan.max_children)),
+			research_budget: Math.max(0, pickNumber(plan, "research_budget", DEFAULT_CONFIG.plan.research_budget)),
+			max_depth: Math.max(1, pickNumber(plan, "max_depth", DEFAULT_CONFIG.plan.max_depth)),
+			memory_file: pickString(plan, "memory_file", DEFAULT_CONFIG.plan.memory_file),
 		},
 		atomic: {
 			max_files: Math.max(1, pickNumber(atomic, "max_files", DEFAULT_CONFIG.atomic.max_files)),

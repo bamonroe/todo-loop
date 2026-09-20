@@ -307,14 +307,15 @@ structurally indistinguishable from an atomic task, so an epic dropped into the
 queue was selected first and handed to a 27B with "Do exactly this task"
 attached — exactly the failure the leaf rule exists to prevent.
 
-`level` closes it. Three tiers, smallest first:
+`level` closes it. The first design was a ladder of three tiers, smallest first:
+**`task`** (atomic, the only level that writes code), **`scope`** (not yet
+implementable — read the code, then add the tasks it breaks into), and **`epic`**
+(spanning — add scopes and tasks). An epic spawns scopes, a scope spawns tasks, a
+task spawns code, so the deepest possible chain is three and nothing recurses.
 
-- **`task`** — atomic, implementable as written. The only level that writes code.
-- **`scope`** — not yet implementable. Working it means reading the code, then
-  adding the tasks it breaks into.
-- **`epic`** — spanning. Working it means adding scopes and tasks.
-
-An epic spawns scopes, a scope spawns tasks, a task spawns code.
+That ladder is gone; see [§5b](#5b-the-ladder-was-the-wrong-axis) for what
+replaced it and why. Everything in the rest of this section was written against
+it and still describes the machinery accurately — only the vocabulary moved.
 
 ### Why a breakdown needs no model
 
@@ -433,6 +434,87 @@ this: *"the verifier has to judge everything on the diff alone."* That warning w
 present and ignored in the run above. It is worth treating as an error in
 practice. The model verifier is for the question tooling cannot answer; every
 question tooling *can* answer should reach it already settled.
+
+---
+
+## 5b. The ladder was the wrong axis
+
+Three real runs against a from-scratch Android app produced the same shape every
+time, and none of it was a prompting problem.
+
+The measurements, from run 2: zero compactions, peak context 14,138 of a 56,320
+window — so the compaction hypothesis was simply wrong. Of 21,878 output tokens,
+roughly 20,115 were thinking. Twelve thinking blocks, sized `[225, 149, 329, 63,
+169, 80, 833, 53, 73, 100, 11133, 6902]`. **Two blocks hold 82% of all thinking**,
+both at the very end, and what they contain is a design for the entire
+application — including an `EqDevice` interface — worked out against an empty
+directory. About 11,000 output tokens per child that actually landed.
+
+And across all three runs the model produced **zero scopes**. The deferral
+affordance existed, the prompt recommended it, and it was never once used.
+
+Both of those follow from the same cause. `level` encoded *depth*, so the root of
+a project was an epic, and an epic is by definition everything — which means the
+first session had to scope the whole thing before any of it existed. Asked that
+question, a model has no available answer except to invent one. And a `scope` is
+the model saying "I refuse to decide this now" in a frame that asked it for a
+plan; emitting one reads as failing the assignment. The affordance contradicted
+the frame it lived in, so no amount of rewording was going to rescue it.
+
+### What replaced it
+
+`level` now says what a session *does*: an **`act`** writes (one session, one
+diff, one verdict), a **`plan`** decides what the next few steps are. A plan may
+spawn either, so nesting is unbounded.
+
+The load-bearing change is that **plans are re-entrant**. A plan is not finished
+by having children; every time its batch completes it comes back for another
+round, holding the last few things that landed. It closes only when a round adds
+nothing. So it is only ever asked *"what are the next few things?"* — never
+*"design this project"* — and by the time it is asked again, the code it needs to
+reason about is on disk rather than imagined. That is the whole mechanism. You
+cannot prompt away a guess; you can decline to ask for one.
+
+Termination moves accordingly. It used to come from the depth cap; it now comes
+from planners running out of next steps. `plan.max_depth` survives only as a
+backstop against a branch that plans forever without building.
+
+### Two rules, because planning is comfortable
+
+Unbounded planning is the failure this design trades for the old one, and it is a
+*comfortable* failure: reading and re-planning always feels productive and never
+risks a failing build. So both guards are mechanical rather than requested.
+
+**Every round must land at least one act.** A round of nothing but plans is
+rejected outright.
+
+**Research is allowanced.** "Go and find out about X" is the honest answer when
+there is genuinely nothing to build yet, so a `research` act satisfies that rule
+— but only `plan.research_budget` times per branch, and the remaining allowance
+is *inherited* by child plans rather than reset. Without inheritance the first
+move any model looking for more research would find is to spawn a sub-planner and
+refill. An escape valve that never closes is not an escape valve; it is a bypass.
+Making the valve real is what makes it safe to shut.
+
+A third, smaller rule turns the first one from a claim about data into a claim
+about time: **acts are ordered ahead of their plan siblings** within a round.
+Left in emission order, a round of `[plan, plan, act]` is walked depth-first, the
+first plan emits its own batch, and the act sits at the bottom of a growing
+subtree for hours. The rule would hold while delivering nothing.
+
+### What is deliberately not guarded
+
+A round can satisfy the at-least-one-act rule with an act that is real but
+unrelated to the branch it is on. There is no clean mechanical test for
+relevance, and inventing speculative machinery for a failure nobody has observed
+is how a harness accumulates weight it cannot justify. It is written down here
+instead, to be watched for.
+
+Triviality is also not policed. `git init` is a nearly empty diff and a perfectly
+good act — it is the thing that has to exist before anything else can. A
+"substantial enough" check would only teach the model to pad. Cross-model
+verification already rejects acts that claim to do something and do not, which is
+the right place for it and does not punish small-but-real.
 
 ## 6. Relevant API reference
 

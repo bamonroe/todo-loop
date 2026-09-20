@@ -210,7 +210,7 @@ test("the task is pinned into the system prompt", async () => {
 	await run("todo-run");
 	const result = (await h.emit("before_agent_start", { systemPrompt: "BASE" })) as { systemPrompt: string };
 	assert.match(result.systemPrompt, /^BASE/);
-	assert.match(result.systemPrompt, /greet \[task\]: Add a greet function/);
+	assert.match(result.systemPrompt, /greet \[code\]: Add a greet function/);
 });
 
 test("a passing verdict closes the task and queues the advance", async () => {
@@ -360,7 +360,7 @@ test("compaction returns fields rather than prose", async () => {
 
 	assert.equal(result.compaction.firstKeptEntryId, "entry-9");
 	assert.equal(result.compaction.tokensBefore, 12345);
-	assert.match(result.compaction.summary, /task:\s+greet \[task\]: Add a greet function/);
+	assert.match(result.compaction.summary, /task:\s+greet \[code\]: Add a greet function/);
 	assert.match(result.compaction.summary, /attempt:\s+2 of 3/);
 	assert.match(result.compaction.summary, /files_touched:.*greet\.ts/);
 	assert.match(result.compaction.summary, /last_failure:\s+the export is missing/);
@@ -433,20 +433,20 @@ attempts = 0
 	if (overrides) fs.writeFileSync(path.join(h.repo, "todoloop.toml"), CONFIG + overrides);
 }
 
-test("a childless epic is handed out as a breakdown, not as work", async () => {
+test("a plan with no round yet is handed out as planning, not as work", async () => {
 	withEpic();
 	await run("todo-run");
 	assert.equal(h.newSessions.length, 1);
-	assert.match(h.newSessions[0], /You are \*\*not\*\* implementing it/);
+	assert.match(h.newSessions[0], /You are \*\*not\*\* implementing this/);
 	assert.match(h.newSessions[0], /todo_add/);
 });
 
-test("todo_add files children under the epic", async () => {
+test("todo_add files this round's items under the plan", async () => {
 	withEpic();
 	await run("todo-run");
 	const first = await call("todo_add", { title: "Rotate the signing secrets", detail: "Touch src/keys.ts only." });
 	assert.equal(first.isError, undefined);
-	await call("todo_add", { title: "Add a TOTP second factor", detail: "New file src/mfa.ts.", level: "scope" });
+	await call("todo_add", { title: "Add a TOTP second factor", detail: "New file src/mfa.ts.", level: "plan" });
 
 	const tasks = store().tasks;
 	assert.deepEqual(
@@ -455,40 +455,43 @@ test("todo_add files children under the epic", async () => {
 	);
 	assert.equal(tasks[1].parent, "auth");
 	assert.equal(tasks[1].detail, "Touch src/keys.ts only.");
-	assert.equal(tasks[2].level, "scope");
+	assert.equal(tasks[2].level, "plan");
 });
 
-test("todo_add refuses on an ordinary task", async () => {
-	await run("todo-run"); // the default queue head, "greet", is a plain task
+test("todo_add refuses on an act", async () => {
+	await run("todo-run"); // the default queue head, "greet", is a plain act
 	const result = await call("todo_add", { title: "Something else entirely", detail: "..." });
 	assert.equal(result.isError, true);
-	assert.match(JSON.stringify(result.content), /is a task, not a breakdown/);
+	assert.match(JSON.stringify(result.content), /is an act, not a plan/);
 	assert.equal(store().tasks.length, 2);
 });
 
-test("a breakdown closes with no model call and no test run", async () => {
+test("a planning round closes with no model call and no test run", async () => {
 	withEpic();
 	await run("todo-run");
 	await call("todo_add", { title: "Rotate the signing secrets", detail: "src/keys.ts" });
 	await call("todo_add", { title: "Add a TOTP second factor", detail: "src/mfa.ts" });
 
 	// Any verdict the fake model would return is the wrong answer here; the
-	// breakdown must be decided without asking it at all.
+	// round must be decided without asking it at all.
 	h.verdict = '{"pass": false, "reason": "the model should never have been consulted"}';
-	const result = await call("todo_complete", { summary: "split into two" });
+	const result = await call("todo_complete", { summary: "two next steps" });
 
 	assert.equal(result.terminate, true);
 	assert.equal(result.isError, undefined);
-	assert.equal(store().tasks[0].status, "done");
 	assert.equal(result.usage, undefined);
+	// The round passed, but the plan reopens rather than closing: it is asked
+	// again once these two have landed, with their results on disk to read.
+	assert.equal(store().tasks[0].status, "todo");
+	assert.match(JSON.stringify(result.content), /revisited once these are done/);
 });
 
-test("a breakdown that touched the tree is rejected", async () => {
+test("a planning round that touched the tree is rejected", async () => {
 	withEpic();
 	await run("todo-run");
 	await call("todo_add", { title: "Rotate the signing secrets", detail: "src/keys.ts" });
 	await call("todo_add", { title: "Add a TOTP second factor", detail: "src/mfa.ts" });
-	writeWork(); // a scope that wrote code
+	writeWork(); // a plan that wrote code
 
 	const result = await call("todo_complete", { summary: "split it and got started" });
 	assert.equal(result.isError, true);
@@ -496,12 +499,12 @@ test("a breakdown that touched the tree is rejected", async () => {
 	assert.equal(store().tasks[0].status, "doing");
 });
 
-test("an empty breakdown is rejected without consulting the verifier", async () => {
+test("an empty first round is rejected without consulting the verifier", async () => {
 	withEpic();
 	await run("todo-run");
-	const result = await call("todo_complete", { summary: "nothing to split" });
+	const result = await call("todo_complete", { summary: "nothing to plan" });
 	assert.equal(result.isError, true);
-	assert.match(JSON.stringify(result.content), /no child tasks/);
+	assert.match(JSON.stringify(result.content), /first round has to produce work/);
 });
 
 test("compaction inside a task flags it as too coarse", async () => {
@@ -519,7 +522,7 @@ test("compaction inside a task flags it as too coarse", async () => {
 	assert.equal(done.status, "done");
 });
 
-test("with on_overflow = promote, an oversized failure becomes a scope", async () => {
+test("with on_overflow = promote, an oversized failure becomes a plan", async () => {
 	fs.writeFileSync(path.join(h.repo, "todoloop.toml"), `${CONFIG}\n[atomic]\non_overflow = "promote"\nmax_files = 5\n`);
 	await run("todo-run");
 	writeWork();
@@ -530,7 +533,7 @@ test("with on_overflow = promote, an oversized failure becomes a scope", async (
 
 	assert.equal(result.terminate, true);
 	const task = store().tasks[0];
-	assert.equal(task.level, "scope");
+	assert.equal(task.level, "plan");
 	assert.equal(task.status, "todo");
 	assert.equal(task.attempts, 0);
 	assert.deepEqual(h.sent, [{ text: "/todo-advance", options: { deliverAs: "followUp", expandPromptTemplates: true } }]);
@@ -549,7 +552,7 @@ test("the default is to warn, not to restructure the queue", async () => {
 	assert.equal(task.attempts, 1);
 });
 
-test("a breakdown carries its children across compaction", async () => {
+test("a planning round carries this round's items across compaction", async () => {
 	withEpic();
 	await run("todo-run");
 	await call("todo_add", { title: "Rotate the signing secrets", detail: "src/keys.ts" });
@@ -559,8 +562,8 @@ test("a breakdown carries its children across compaction", async () => {
 	})) as { compaction: { summary: string } };
 
 	// Without this the worker forgets what it already added and duplicates it.
-	assert.match(result.compaction.summary, /children_added: auth\.rotate-the-signing-secrets/);
-	assert.match(result.compaction.summary, /Do not re-add children/);
+	assert.match(result.compaction.summary, /added_this_round: auth\.rotate-the-signing-secrets/);
+	assert.match(result.compaction.summary, /Do not re-add items/);
 	assert.match(result.compaction.summary, /Write no code/);
 });
 
@@ -628,7 +631,7 @@ test("todo_read returns the assigned task in full", async () => {
 	const result = await readTool({});
 	assert.equal(result.isError, undefined);
 	const text = result.content[0].text;
-	assert.match(text, /greet \[task\] doing/);
+	assert.match(text, /greet \[code\] doing/);
 	assert.match(text, /Create greet\.ts exporting greet\(name\)/, "self is the one task that carries its detail");
 });
 
@@ -636,7 +639,7 @@ test("todo_read never hands over a neighbour's detail", async () => {
 	await run("todo-run");
 	const result = await readTool({ relation: "siblings" });
 	const text = result.content[0].text;
-	assert.match(text, /farewell \[task\] todo — Add a farewell function/);
+	assert.match(text, /farewell \[code\] todo — Add a farewell function/);
 	assert.doesNotMatch(
 		text,
 		/Create greet\.ts exporting/,
@@ -654,8 +657,8 @@ test("todo_read reports an empty relation rather than falling back to the whole 
 
 test("todo_read caps a long relation", async () => {
 	await run("todo-run");
-	// Twenty siblings: legal for a breakdown, and more than one call should be
-	// able to spend the worker's window on.
+	// Twenty siblings: more than one call should be able to spend the worker's
+	// window on, however they got there.
 	const file = path.join(h.repo, "todo.toml");
 	const current = loadStore(file);
 	for (let i = 0; i < 20; i++) {
@@ -672,7 +675,7 @@ test("todo_read caps a long relation", async () => {
 	const result = await readTool({ relation: "siblings" });
 	const text = result.content[0].text;
 	assert.match(text, /more not shown/);
-	assert.equal(text.split("\n").filter((line: string) => line.includes("[task]")).length, 12);
+	assert.equal(text.split("\n").filter((line: string) => line.includes("[code]")).length, 12);
 	assert.doesNotMatch(text, /nobody else should ever see/);
 });
 

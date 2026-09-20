@@ -33,8 +33,11 @@ import {
 } from "../src/evidence.ts";
 import { renderAssignmentPrompt, renderPinnedTask } from "../src/prompt.ts";
 import {
+	type ActKind,
 	allowedChildLevels,
 	assignmentFor,
+	depthOf,
+	kindOf,
 	childrenOf,
 	counts,
 	createTask,
@@ -46,9 +49,11 @@ import {
 	markDoing,
 	markDone,
 	markOverflow,
-	nextLeaf,
+	nextReady,
 	parentOf,
-	promoteToScope,
+	promoteToPlan,
+	researchBudgetOf,
+	unfinishedChildren,
 	recordFailure,
 	renderTree,
 	resolveStorePath,
@@ -57,7 +62,7 @@ import {
 	type Task,
 	type TaskLevel,
 } from "../src/store.ts";
-import { checkDecomposition } from "../src/decompose.ts";
+import { checkPlanRound, type PlanVerdict } from "../src/plan.ts";
 
 /**
  * The most a single todo_read relation may return. A breakdown of thirty
@@ -194,24 +199,24 @@ export default function (pi: ExtensionAPI) {
 
 	const runVerification = async (ctx: ExtensionContext, task: Task, baseCommit: string): Promise<Verdict> => {
 		const store = read();
-		const decomposing = assignmentFor(task) === "decompose";
+		const planning = assignmentFor(task) === "plan";
 
 		const evidence = await gatherEvidence({
 			cwd,
 			baseCommit,
-			// A breakdown runs no build and no tests: it changed no code, so there is
-			// nothing to build, and paying for a full test run to confirm that would
-			// be the most expensive way to learn nothing.
-			testCommand: decomposing ? "" : config.verify.test_command,
-			buildCommand: decomposing ? "" : config.verify.build_command,
-			requireTestsPass: decomposing ? false : config.verify.require_tests_pass,
+			// A planning round runs no build and no tests: it changed no code, so
+			// there is nothing to build, and paying for a full test run to confirm
+			// that would be the most expensive way to learn nothing.
+			testCommand: planning ? "" : config.verify.test_command,
+			buildCommand: planning ? "" : config.verify.build_command,
+			requireTestsPass: planning ? false : config.verify.require_tests_pass,
 			timeoutMs: config.verify.timeout_ms,
 			maxBytes: config.verify.max_evidence_bytes,
 			exclude: ownedPaths(store),
 		});
 
-		// A breakdown is judged entirely by tooling — no model, no network, no cost.
-		if (decomposing) return checkDecomposition(store, task, evidence.files, config);
+		// A round is judged entirely by tooling — no model, no network, no cost.
+		if (planning) return checkPlanRound(store, task, evidence.files, config);
 
 		if (!config.verify.enabled) return { pass: true, reason: "Verification disabled.", mechanical: true };
 		noteOverflow(task, evidence.files);
@@ -260,7 +265,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		const task = nextLeaf(store);
+		const task = nextReady(store);
 		if (!task) {
 			store.loop.running = false;
 			store.loop.current = "";
@@ -290,7 +295,10 @@ export default function (pi: ExtensionAPI) {
 			attempts: task.attempts,
 			maxAttempts: config.verify.max_attempts,
 			maxFiles: config.atomic.max_files,
-			minChildren: config.decompose.min_children,
+			maxChildren: config.plan.max_children,
+			researchBudget: researchBudgetOf(task, config.plan.research_budget),
+			maxDepth: config.plan.max_depth,
+			memoryFile: config.plan.memory_file,
 			buildCommand: config.verify.build_command,
 			testCommand: config.verify.test_command,
 		});
@@ -335,7 +343,7 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			init(ctx);
 			const store = read();
-			if (!nextLeaf(store)) {
+			if (!nextReady(store)) {
 				say(ctx, "Nothing to do — no incomplete leaf tasks.", "warning");
 				return;
 			}
@@ -441,6 +449,29 @@ export default function (pi: ExtensionAPI) {
 
 			if (verdict.pass) {
 				const overflowNote = task.overflowed ? ` (note: ${task.overflow_reason} — this task was larger than one task should be)` : "";
+				const plan = assignmentFor(task) === "plan" ? (verdict as PlanVerdict) : undefined;
+				if (plan?.spentResearch) {
+					task.research_budget = Math.max(0, researchBudgetOf(task, config.plan.research_budget) - 1);
+				}
+				// A plan reopens rather than closing: it is asked again once this
+				// batch has landed, with the results on disk to decide against. Only
+				// a round that adds nothing finishes it.
+				if (plan && !plan.finished) {
+					task.status = "todo";
+					task.attempts = 0;
+					task.rejections = undefined;
+					if (store.loop.current === task.id) store.loop.current = "";
+					store.loop.last_failure = "";
+					write(store);
+					await checkpoint(task, params.summary);
+					pi.sendUserMessage("/todo-advance", { deliverAs: "followUp", expandPromptTemplates: true });
+					return {
+						content: [{ type: "text", text: `${verdict.reason} ${task.id} stays open and is revisited once these are done.` }],
+						details: { taskId: task.id, verdict },
+						usage,
+						terminate: true,
+					};
+				}
 				markDone(store, task, params.summary || verdict.reason);
 				write(store);
 				await checkpoint(task, params.summary);
@@ -462,12 +493,12 @@ export default function (pi: ExtensionAPI) {
 			if (
 				config.atomic.on_overflow === "promote" &&
 				task.overflowed &&
-				levelOf(task) === "task" &&
-				assignmentFor(task) === "implement"
+				assignmentFor(task) === "act"
 			) {
-				promoteToScope(store, task, `Promoted to scope: ${task.overflow_reason ?? "over budget"}`);
+				promoteToPlan(store, task, `Promoted to plan: ${task.overflow_reason ?? "over budget"}`);
+				task.research_budget = researchBudgetOf(task, config.plan.research_budget);
 				write(store);
-				say(ctx, `${task.id} was too coarse (${task.overflow_reason}); it will be broken down instead.`, "warning");
+				say(ctx, `${task.id} was too coarse (${task.overflow_reason}); its next steps get decided instead.`, "warning");
 				pi.sendUserMessage("/todo-advance", { deliverAs: "followUp", expandPromptTemplates: true });
 				return {
 					content: [
@@ -562,7 +593,7 @@ export default function (pi: ExtensionAPI) {
 
 			const relation = (params.relation ?? "self") as "self" | "parent" | "children" | "siblings";
 			if (relation === "self") {
-				const lines = [`${task.id} [${levelOf(task)}] ${task.status} — ${task.title}`];
+				const lines = [`${task.id} [${levelOf(task) === "plan" ? "plan" : kindOf(task)}] ${task.status} — ${task.title}`];
 				if (task.detail) lines.push("", task.detail);
 				return {
 					content: [{ type: "text", text: lines.join("\n") }],
@@ -594,7 +625,9 @@ export default function (pi: ExtensionAPI) {
 			// A breakdown may legally produce dozens of children; one tool call must
 			// not be able to spend the whole window on them.
 			const shown = rows.slice(0, TODO_READ_MAX_ROWS);
-			const lines = shown.map((row) => `${row.id} [${levelOf(row)}] ${row.status} — ${row.title}`);
+			const lines = shown.map(
+				(row) => `${row.id} [${levelOf(row) === "plan" ? "plan" : kindOf(row)}] ${row.status} — ${row.title}`,
+			);
 			if (rows.length > shown.length) lines.push(`… ${rows.length - shown.length} more not shown.`);
 			lines.push("", "Titles and status only — open their code if you need to know what they did.");
 			return {
@@ -605,24 +638,31 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	/**
-	 * The only way a scope or an epic produces anything. Children are inserted
-	 * beside their parent rather than appended, so the loop stays depth-first.
+	 * The only way a planning round produces anything. Children are inserted
+	 * beside their parent rather than appended, so the loop stays depth-first,
+	 * and acts are ordered ahead of plans so every round lands work promptly.
 	 */
 	pi.registerTool({
 		name: "todo_add",
 		label: "Add Todo",
 		description:
-			"Add a child item under the scope or epic currently being broken down. Call once per child. Only use this while working a breakdown.",
-		promptSnippet: "While breaking down a scope or epic, add each child with todo_add.",
+			"Add one of this planning round's next steps. Call once per item, the moment you decide it. Only use this while working a plan.",
+		promptSnippet: "While planning, write each next step down with todo_add as you decide it.",
 		parameters: Type.Object({
 			title: Type.String({ description: "One line naming the work. Must stand on its own." }),
 			detail: Type.String({
 				description:
-					"Everything the worker will need: files, function names, formats, constraints. This is the only context that task will ever have.",
+					"Everything the worker will need: files, commands, formats, constraints. This is the only context that item will ever have.",
 			}),
 			level: Type.Optional(
-				Type.Union([Type.Literal("task"), Type.Literal("scope")], {
-					description: "task = atomic and implementable now. scope = still needs investigation before it can be split.",
+				Type.Union([Type.Literal("act"), Type.Literal("plan")], {
+					description:
+						"act = one session, one diff; you can name the files now. plan = you cannot yet, so it gets its own round later.",
+				}),
+			),
+			kind: Type.Optional(
+				Type.Union([Type.Literal("code"), Type.Literal("docs"), Type.Literal("research")], {
+					description: "What an act produces. Ignored for a plan. Defaults to code.",
 				}),
 			),
 			id: Type.Optional(Type.String({ description: "Explicit id. Defaults to a slug of the title." })),
@@ -639,12 +679,12 @@ export default function (pi: ExtensionAPI) {
 					isError: true,
 				};
 			}
-			if (assignmentFor(parent) !== "decompose") {
+			if (assignmentFor(parent) !== "plan") {
 				return {
 					content: [
 						{
 							type: "text",
-							text: `${parent.id} is a task, not a breakdown. Implement it rather than splitting it. If it is genuinely too large, call todo_block and say so.`,
+							text: `${parent.id} is an act, not a plan. Do it rather than splitting it. If it is genuinely too large, call todo_block and say so.`,
 						},
 					],
 					details: {},
@@ -652,8 +692,34 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			const level = (params.level ?? "task") as TaskLevel;
+			const level = (params.level ?? "act") as TaskLevel;
+			const kind = (params.kind ?? "code") as ActKind;
 			const allowed = allowedChildLevels(levelOf(parent));
+			if (level === "plan" && depthOf(parent, store.tasks) + 1 >= config.plan.max_depth) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `${parent.id} is at the nesting cap (${config.plan.max_depth}); this round may only add acts. Cut the work into steps whose files you can name.`,
+						},
+					],
+					details: {},
+					isError: true,
+				};
+			}
+			const roundSoFar = unfinishedChildren(parent.id, store.tasks).length;
+			if (roundSoFar >= config.plan.max_children) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `This round already has ${roundSoFar} item(s), which is the cap. Stop here and call todo_complete — you will be asked again once these are done.`,
+						},
+					],
+					details: {},
+					isError: true,
+				};
+			}
 			if (!allowed.includes(level)) {
 				return {
 					content: [
@@ -673,7 +739,10 @@ export default function (pi: ExtensionAPI) {
 				title: params.title.trim(),
 				detail: params.detail.trim() || undefined,
 				parent: parent.id,
-				level: level !== "task" ? level : undefined,
+				level: level === "plan" ? "plan" : undefined,
+				kind: level === "act" ? kind : undefined,
+				// Inherited, never refreshed — see Task.research_budget.
+				research_budget: level === "plan" ? researchBudgetOf(parent, config.plan.research_budget) : undefined,
 			});
 
 			insertChildren(store, parent.id, [child]);
@@ -681,8 +750,10 @@ export default function (pi: ExtensionAPI) {
 
 			const total = childrenOf(parent.id, store.tasks).length;
 			return {
-				content: [{ type: "text", text: `Added ${id} [${level}] under ${parent.id} (${total} so far).` }],
-				details: { taskId: id, parent: parent.id, level },
+				content: [
+					{ type: "text", text: `Added ${id} [${level === "plan" ? "plan" : kind}] under ${parent.id} (${total} so far).` },
+				],
+				details: { taskId: id, parent: parent.id, level, kind },
 			};
 		},
 	});
@@ -842,26 +913,24 @@ export default function (pi: ExtensionAPI) {
 		compactedThisTask = true;
 
 		const files = await changedFiles(cwd, store.loop.base_commit);
-		const decomposing = assignmentFor(task) === "decompose";
+		const planning = assignmentFor(task) === "plan";
 		const summary = [
 			"# Task state carried across compaction",
-			`task:          ${task.id} [${levelOf(task)}]: ${task.title}`,
-			decomposing
-				? "job:           break this down into child tasks with todo_add. Write no code."
-				: "",
+			`task:          ${task.id} [${planning ? "plan" : kindOf(task)}]: ${task.title}`,
+			planning ? "job:           decide this round's next steps and add them with todo_add. Write no code." : "",
 			task.detail ? `detail:        ${task.detail.trim().replace(/\n/g, "\n               ")}` : "",
 			`attempt:       ${task.attempts + 1} of ${config.verify.max_attempts}`,
-			decomposing
-				? `children_added: ${
-						childrenOf(task.id, store.tasks)
-							.map((child) => `${child.id} [${levelOf(child)}]`)
+			planning
+				? `added_this_round: ${
+						unfinishedChildren(task.id, store.tasks)
+							.map((child) => `${child.id} [${levelOf(child) === "plan" ? "plan" : kindOf(child)}]`)
 							.join(", ") || "(none yet)"
 					}`
 				: `files_touched: ${files.length ? files.join(", ") : "(none yet)"}`,
 			`last_failure:  ${store.loop.last_failure || "(none)"}`,
 			"",
-			decomposing
-				? "Do not re-add children that are already listed above. Finish by calling todo_complete."
+			planning
+				? "Do not re-add items that are already listed above. Finish by calling todo_complete."
 				: "Finish by calling todo_complete. Re-read any file you need; the exploration that got you here is gone.",
 		]
 			.filter(Boolean)

@@ -131,12 +131,12 @@ test("a dry run names the model the real run would use", async () => {
 	assert.match(rehosted.stdout, /would run pi \(opencode\/gpt-5\.6-terra\) with prompt/);
 });
 
-test("--dry-run previews a breakdown as a breakdown", async () => {
-	assert.equal((await todo("add", "auth", "Rebuild the authentication system", "--level", "epic")).code, 0);
-	// The epic is last in the queue, so the dry run has to walk to it.
+test("--dry-run previews a planning round as a planning round", async () => {
+	assert.equal((await todo("add", "auth", "Rebuild the authentication system", "--level", "plan")).code, 0);
+	// The plan is last in the queue, so the dry run has to walk to it.
 	const result = await todo("run", "--dry-run", "--max", "20");
-	assert.match(result.stdout, /break down epic — auth/);
-	assert.match(result.stdout, /You are \*\*not\*\* implementing it/);
+	assert.match(result.stdout, /plan next steps for — auth/);
+	assert.match(result.stdout, /You are \*\*not\*\* implementing this/);
 	// Still untouched afterwards.
 	assert.equal(loadStore(path.join(workspace, "todo.toml")).tasks.at(-1)?.status, "todo");
 });

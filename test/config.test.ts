@@ -57,8 +57,32 @@ test("worker_timeout_ms parses and defaults to no cap", () => {
 });
 
 test("the breakdown gets its own budget, separate from a worker's", () => {
-	assert.equal(parseConfig("").loop.decompose_timeout_ms, 0);
-	const config = parseConfig("[loop]\nworker_timeout_ms = 900000\ndecompose_timeout_ms = 900000\n");
-	assert.equal(config.loop.decompose_timeout_ms, 900000);
+	assert.equal(parseConfig("").loop.plan_timeout_ms, 0);
+	const config = parseConfig("[loop]\nworker_timeout_ms = 900000\nplan_timeout_ms = 900000\n");
+	assert.equal(config.loop.plan_timeout_ms, 900000);
 	assert.equal(config.loop.worker_timeout_ms, 900000);
+});
+
+test("the old decompose_timeout_ms is still honoured", () => {
+	// Renamed with the levels. A todoloop.toml that still says it must not
+	// silently lose its budget and start running unbounded planning sessions.
+	assert.equal(parseConfig("[loop]\ndecompose_timeout_ms = 900000\n").loop.plan_timeout_ms, 900000);
+	// The new name wins where both are present.
+	assert.equal(
+		parseConfig("[loop]\ndecompose_timeout_ms = 900000\nplan_timeout_ms = 60000\n").loop.plan_timeout_ms,
+		60000,
+	);
+});
+
+test("the plan section has defaults and reads overrides", () => {
+	const fresh = parseConfig("").plan;
+	assert.equal(fresh.max_children, 5);
+	assert.equal(fresh.research_budget, 2);
+	assert.equal(fresh.max_depth, 8);
+	assert.equal(fresh.memory_file, "NOTES.md");
+
+	const tuned = parseConfig("[plan]\nmax_children = 3\nresearch_budget = 0\nmemory_file = \"docs/notes.md\"\n").plan;
+	assert.equal(tuned.max_children, 3);
+	assert.equal(tuned.research_budget, 0, "zero is a real setting: no research rounds at all");
+	assert.equal(tuned.memory_file, "docs/notes.md");
 });

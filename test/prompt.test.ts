@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ancestryOf, renderAssignmentPrompt, renderPinnedTask, renderTaskPrompt } from "../src/prompt.ts";
+import { ancestryOf, renderAssignmentPrompt, renderPinnedTask, renderActPrompt } from "../src/prompt.ts";
 import { parseStore } from "../src/store.ts";
 
 const store = parseStore(`
@@ -18,23 +18,23 @@ const task = store.tasks[1];
 
 test("includes ancestors so a leaf is not a non sequitur", () => {
 	assert.deepEqual(ancestryOf(store, task), ["api: Build the API"]);
-	assert.match(renderTaskPrompt(store, task, { mode: "tool" }), /Working within: api: Build the API/);
+	assert.match(renderActPrompt(store, task, { mode: "tool" }), /Working within: api: Build the API/);
 });
 
 test("tool mode requires the completion tool", () => {
-	const prompt = renderTaskPrompt(store, task, { mode: "tool" });
+	const prompt = renderActPrompt(store, task, { mode: "tool" });
 	assert.match(prompt, /todo_complete/);
 	assert.match(prompt, /todo_block/);
 });
 
 test("standalone mode asks for a summary instead", () => {
-	const prompt = renderTaskPrompt(store, task, { mode: "standalone" });
+	const prompt = renderActPrompt(store, task, { mode: "standalone" });
 	assert.doesNotMatch(prompt, /todo_complete/);
 	assert.match(prompt, /BLOCKED:/);
 });
 
 test("carries the previous rejection with its attempt count", () => {
-	const prompt = renderTaskPrompt(store, task, {
+	const prompt = renderActPrompt(store, task, {
 		mode: "tool",
 		lastFailure: "The route is never registered.",
 		attempts: 1,
@@ -46,7 +46,7 @@ test("carries the previous rejection with its attempt count", () => {
 
 test("the pinned version carries task, detail and last failure", () => {
 	const pinned = renderPinnedTask(store, task, "No tests were added.");
-	assert.match(pinned, /api\.health \[task\]: Add a health endpoint/);
+	assert.match(pinned, /api\.health \[code\]: Add a health endpoint/);
 	assert.match(pinned, /Return 200/);
 	assert.match(pinned, /No tests were added/);
 });
@@ -65,96 +65,156 @@ title = "B"
 	assert.ok(ancestryOf(cyclic, cyclic.tasks[0]).length <= 2);
 });
 
-// ------------------------------------------------------- breakdown prompts
+// ---------------------------------------------------------- plan prompts
 
-const epic = parseStore(`
+const plan = parseStore(`
 [[task]]
 id = "auth"
 title = "Rebuild authentication"
-level = "epic"
+level = "plan"
 status = "todo"
 attempts = 0
 detail = "Sessions, OAuth, password reset."
 `);
 
-test("a childless epic gets the breakdown prompt, not the task prompt", () => {
-	const prompt = renderAssignmentPrompt(epic, epic.tasks[0], { mode: "tool", maxFiles: 5, minChildren: 2 });
-	assert.match(prompt, /You are \*\*not\*\* implementing it/);
+const PLAN_OPTS = { mode: "tool" as const, maxFiles: 5, maxChildren: 5, researchBudget: 2, maxDepth: 8 };
+
+test("a plan gets the planning prompt, not the act prompt", () => {
+	const prompt = renderAssignmentPrompt(plan, plan.tasks[0], PLAN_OPTS);
+	assert.match(prompt, /You are \*\*not\*\* implementing this/);
 	assert.match(prompt, /todo_add/);
-	assert.match(prompt, /at least 2 child items/);
 	// The instruction has a mechanical check behind it, and says so.
 	assert.match(prompt, /rejected automatically if the working tree changes/);
 });
 
-test("the breakdown prompt states the atomicity bar in checkable terms", () => {
-	const prompt = renderAssignmentPrompt(epic, epic.tasks[0], { mode: "tool", maxFiles: 3, minChildren: 2 });
-	assert.match(prompt, /Name the files/);
-	assert.match(prompt, /More than 3 files/);
-	assert.match(prompt, /no memory of this one/);
+test("the planning prompt asks for the next few steps, not the whole project", () => {
+	// The whole reason the hierarchy was rewritten: asked to scope an entire
+	// project up front, the model spent 82% of its output tokens designing an
+	// application against an empty directory.
+	const prompt = renderAssignmentPrompt(plan, plan.tasks[0], { ...PLAN_OPTS, maxChildren: 5 });
+	assert.match(prompt, /what are the next 5 things that need doing/i);
+	assert.match(prompt, /not\*\* designing the whole of it/);
+	assert.match(prompt, /You will be asked again after these are done/);
 });
 
-test("an epic may offer scope children; a scope may not", () => {
-	const asEpic = renderAssignmentPrompt(epic, epic.tasks[0], { mode: "tool" });
-	assert.match(asEpic, /`scope` — anything else/);
-	// Scope is the default, not the fallback: the model produced zero scopes
-	// across two real runs while the wording framed deferring as a failure to
-	// work it out.
-	assert.match(asEpic, /Prefer `scope` whenever naming the files would mean deciding a design first/);
-
-	const scope = parseStore(`
+test("a re-entered plan is handed what already landed", () => {
+	const store = parseStore(`
 [[task]]
-id = "sessions"
-title = "Rework session storage"
-level = "scope"
+id = "auth"
+title = "Rebuild authentication"
+level = "plan"
 status = "todo"
 attempts = 0
+
+[[task]]
+id = "auth.init"
+title = "Initialise the repository"
+parent = "auth"
+status = "done"
+attempts = 0
+summary = "git init plus a .gitignore."
 `);
-	const asScope = renderAssignmentPrompt(scope, scope.tasks[0], { mode: "tool" });
-	assert.match(asScope, /A scope may only spawn tasks/);
+	const prompt = renderAssignmentPrompt(store, store.tasks[0], PLAN_OPTS);
+	assert.match(prompt, /What has been done so far/);
+	assert.match(prompt, /auth\.init: Initialise the repository — git init plus a \.gitignore\./);
+	assert.match(prompt, /not against what you would have planned before it existed/);
 });
 
-test("the standalone breakdown prompt gives the CLI form instead of the tool", () => {
-	const prompt = renderAssignmentPrompt(epic, epic.tasks[0], { mode: "standalone" });
+test("a first round is told it cannot close the branch; a later one is told it can", () => {
+	const first = renderAssignmentPrompt(plan, plan.tasks[0], PLAN_OPTS);
+	assert.match(first, /first round, so it has to produce work/);
+
+	const store = parseStore(`
+[[task]]
+id = "auth"
+title = "Rebuild authentication"
+level = "plan"
+status = "todo"
+attempts = 0
+
+[[task]]
+id = "auth.init"
+title = "Initialise the repository"
+parent = "auth"
+status = "done"
+attempts = 0
+`);
+	const later = renderAssignmentPrompt(store, store.tasks[0], PLAN_OPTS);
+	assert.match(later, /add nothing at all/);
+	assert.match(later, /An empty round is how a branch closes/);
+});
+
+test("the progress rule names the research allowance it has left", () => {
+	const some = renderAssignmentPrompt(plan, plan.tasks[0], { ...PLAN_OPTS, researchBudget: 2, memoryFile: "NOTES.md" });
+	assert.match(some, /Every round must land at least one act/);
+	assert.match(some, /may do that 2 more time\(s\)/);
+	assert.match(some, /NOTES\.md/);
+
+	// An escape valve that never closes is a bypass, so the prompt says when it
+	// has shut rather than letting the model discover it by being rejected.
+	const none = renderAssignmentPrompt(plan, plan.tasks[0], { ...PLAN_OPTS, researchBudget: 0 });
+	assert.match(none, /has used its research allowance/);
+	assert.match(none, /needs an act that writes code or documentation/);
+	assert.doesNotMatch(none, /may do that \d+ more time/);
+});
+
+test("deferring is offered as the default, and withdrawn at the nesting cap", () => {
+	const prompt = renderAssignmentPrompt(plan, plan.tasks[0], PLAN_OPTS);
+	assert.match(prompt, /Prefer `plan` whenever naming the files would mean deciding a design first/);
+
+	const capped = renderAssignmentPrompt(plan, plan.tasks[0], { ...PLAN_OPTS, maxDepth: 1 });
+	assert.match(capped, /at the nesting cap, so this round may add acts only/);
+	assert.doesNotMatch(capped, /Prefer `plan` whenever/);
+});
+
+test("items are written as they are decided, not planned in one block", () => {
+	// The run-2 round spent 20,115 of its 21,878 output tokens on thinking, 82%
+	// of it in two blocks at the end, and had written two children when it was
+	// cut off. Everything worked out in those blocks died with the session.
+	const prompt = renderAssignmentPrompt(plan, plan.tasks[0], PLAN_OPTS);
+	assert.match(prompt, /Add each item the moment you decide it/);
+	assert.match(prompt, /Keep the deliberation per item short/);
+});
+
+test("the standalone planning prompt gives the CLI form instead of the tool", () => {
+	const prompt = renderAssignmentPrompt(plan, plan.tasks[0], { ...PLAN_OPTS, mode: "standalone" });
 	assert.match(prompt, /todo add <id>/);
 	assert.match(prompt, /--parent auth/);
+	assert.match(prompt, /--kind <code\|docs\|research>/);
 	assert.doesNotMatch(prompt, /todo_add/);
 });
 
-test("the pinned breakdown reminds the worker it is not writing code", () => {
-	const pinned = renderPinnedTask(epic, epic.tasks[0], "");
-	assert.match(pinned, /auth \[epic\]/);
-	assert.match(pinned, /breaking this down, not implementing it/);
-	assert.match(pinned, /a non-empty diff rejects the breakdown/);
+test("the pinned plan reminds the worker it is not writing code", () => {
+	const pinned = renderPinnedTask(plan, plan.tasks[0], "");
+	assert.match(pinned, /auth \[plan\]/);
+	assert.match(pinned, /deciding the next few steps, not implementing them/);
+	assert.match(pinned, /a non-empty diff rejects the round/);
 });
 
-test("an implementation task is told what to do if it does not fit", () => {
+test("an act is told what to do if it does not fit", () => {
 	const prompt = renderAssignmentPrompt(store, task, { mode: "tool", maxFiles: 5 });
 	assert.match(prompt, /roughly 5 files at most/);
 	assert.match(prompt, /a queue bug/);
 });
 
-test("a scope is told one task is a real answer; an epic is not", () => {
-	const scope = parseStore(`
+test("blocking is reserved for genuinely impossible work", () => {
+	const prompt = renderAssignmentPrompt(plan, plan.tasks[0], PLAN_OPTS);
+	assert.match(prompt, /halts the whole queue/);
+});
+
+test("a research act is told where its finding has to land", () => {
+	const store = parseStore(`
 [[task]]
-id = "sessions"
-title = "Rework session storage"
-level = "scope"
+id = "look"
+title = "Find the Android build entry point"
+kind = "research"
 status = "todo"
 attempts = 0
 `);
-	const asScope = renderAssignmentPrompt(scope, scope.tasks[0], { mode: "tool", minChildren: 2 });
-	assert.match(asScope, /add exactly that one task — that is a real answer/);
-
-	const asEpic = renderAssignmentPrompt(epic, epic.tasks[0], { mode: "tool", minChildren: 2 });
-	assert.match(asEpic, /at least 2 child items/);
-});
-
-test("blocking is reserved for genuinely impossible work", () => {
-	const prompt = renderAssignmentPrompt(epic, epic.tasks[0], { mode: "tool" });
-	// The earlier wording sent a merely-small scope to todo_block, which halts
-	// the whole queue and strands everything behind it.
-	assert.match(prompt, /halts the whole queue/);
-	assert.doesNotMatch(prompt, /single atomic task, or cannot be broken down/);
+	const prompt = renderAssignmentPrompt(store, store.tasks[0], { mode: "tool", memoryFile: "NOTES.md" });
+	assert.match(prompt, /This is a research act/);
+	assert.match(prompt, /NOTES\.md/);
+	assert.match(prompt, /A finding nobody writes down is a finding the next worker pays to rediscover/);
 });
 
 /**
@@ -215,11 +275,3 @@ test("sibling titles are handed over, sibling details are not", () => {
 	assert.match(prompt, /Write BandProfile\.adapt/, "the worker's own detail still comes through in full");
 });
 
-test("children are written as they are decided, not planned in one block", () => {
-	// The run-2 breakdown spent 20,115 of its 21,878 output tokens on thinking,
-	// 82% of it in two blocks at the end, and had written two children when it
-	// was cut off. Everything worked out in those blocks died with the session.
-	const prompt = renderAssignmentPrompt(epic, epic.tasks[0], { mode: "tool" });
-	assert.match(prompt, /Add each child the moment you decide it\. Do not plan them all first\./);
-	assert.match(prompt, /Keep the deliberation per child short/);
-});
