@@ -201,7 +201,7 @@ test("a local verifier is tuned on the wire, because no pi registry tunes it her
 	// this decision does not need.
 	assert.equal(seen.body?.reasoning_effort, "low");
 	// A local reply is not free: an uncapped reasoning model blocks the loop.
-	assert.equal(seen.body?.max_tokens, 2048);
+	assert.equal(seen.body?.max_tokens, 8192);
 	await server.close();
 });
 
@@ -228,4 +228,31 @@ test("local sampling is configurable, since the right values follow the model", 
 	assert.equal(parsed.ollama.temperature, 0.2);
 	assert.equal(parsed.ollama.max_tokens, 512);
 	assert.equal(endpointFor("ollama/m", parsed).params?.reasoning_effort, "none");
+});
+
+test("a verdict truncated by the token cap says so instead of looking like a broken model", async () => {
+	// A reasoning model that spends its whole budget thinking comes back with an
+	// empty content AND an empty reasoning_content — ollama drops the partial
+	// thinking. Reported raw, that reads as "no usable verdict: " with nothing
+	// after the colon, which sends you looking at the model rather than the cap.
+	const server = stubEndpoint({}, { choices: [{ finish_reason: "length", message: { content: "" } }] });
+	const complete = chatCompleter({ baseUrl: await server.url, model: "m", apiKey: "k", maxTokens: 2048 });
+	const verdict = await verify(task, evidence, complete);
+
+	assert.equal(verdict.pass, false);
+	assert.equal(verdict.mechanical, true);
+	assert.match(verdict.reason, /2048-token budget/);
+	assert.match(verdict.reason, /max_tokens/);
+	await server.close();
+});
+
+test("a truncated reply that still carried the verdict is kept", async () => {
+	// Hitting the cap is not itself a failure: if the verdict made it out before
+	// the model ran out of room, it counts.
+	const server = stubEndpoint({}, {
+		choices: [{ finish_reason: "length", message: { content: '{"pass": true, "reason": "ok"}' } }],
+	});
+	const complete = chatCompleter({ baseUrl: await server.url, model: "m", apiKey: "k", maxTokens: 2048 });
+	assert.equal((await verify(task, evidence, complete)).pass, true);
+	await server.close();
 });

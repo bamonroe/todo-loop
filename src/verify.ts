@@ -154,9 +154,22 @@ export function chatCompleter(endpoint: ChatEndpoint): Completer {
 			throw new Error(`${response.status} ${response.statusText} from ${endpoint.baseUrl}${detail ? `: ${detail}` : ""}`);
 		}
 		const payload = (await response.json()) as {
-			choices?: { message?: { content?: string; reasoning_content?: string } }[];
+			choices?: { finish_reason?: string; message?: { content?: string; reasoning_content?: string } }[];
 		};
-		const message = payload.choices?.[0]?.message;
+		const choice = payload.choices?.[0];
+		const message = choice?.message;
+
+		// A reasoning model that spends its whole budget thinking returns an empty
+		// content *and* an empty reasoning_content — ollama drops the partial
+		// thinking rather than handing it back. Undiagnosed, that arrives as
+		// "returned no usable verdict: " with nothing after the colon, which looks
+		// like a broken model rather than a cap that is set too low.
+		if (choice?.finish_reason === "length" && !message?.content?.trim() && !message?.reasoning_content?.trim()) {
+			throw new Error(
+				`the verifier used its entire ${endpoint.maxTokens ?? "output"}-token budget on thinking and returned no verdict — ` +
+					"raise ollama.max_tokens, or lower ollama.reasoning_effort",
+			);
+		}
 		// Reasoning models that hit the token cap mid-thought leave content empty
 		// but the verdict visible in reasoning_content. Rescue it rather than
 		// failing closed on a task that may well be fine.

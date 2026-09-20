@@ -126,9 +126,14 @@ export interface Config {
 		 */
 		reasoning_effort: string;
 		/**
-		 * Cap on the local reply. Unbounded is not free on a reasoning model: a
-		 * verdict that never stops thinking blocks the loop rather than costing
-		 * money, which is the worse failure of the two.
+		 * Cap on the local reply.
+		 *
+		 * Unbounded is not free on a reasoning model: a verdict that never stops
+		 * thinking blocks the loop rather than costing money, which is the worse
+		 * failure of the two. But set it too low and the model spends the whole
+		 * budget thinking and returns nothing at all — measured on qwen3.5:9b
+		 * against a real scaffold diff, 2048 was not enough and 8192 answered in
+		 * 1164. The cap is a backstop against a runaway, not a budget to aim at.
 		 */
 		max_tokens: number;
 	};
@@ -173,7 +178,7 @@ export const DEFAULT_CONFIG: Config = {
 		top_p: 0.95,
 		presence_penalty: 0.5,
 		reasoning_effort: "low",
-		max_tokens: 2048,
+		max_tokens: 8192,
 	},
 };
 

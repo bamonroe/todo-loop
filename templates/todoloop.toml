@@ -122,6 +122,9 @@ presence_penalty = 0.5
 # high | medium | low | none. "max" and "xhigh" make the template raise a 500 and
 # are dropped rather than sent.
 reasoning_effort = "low"
-# Cap on the local reply. Unbounded is not free on a reasoning model: a verdict
-# that never stops thinking blocks the loop, which is worse than a bill.
-max_tokens = 2048
+# Cap on the local reply — a backstop against a runaway, not a budget to aim at.
+# Too low is its own failure: the model spends the whole budget thinking and
+# returns an empty response, which reads as a broken verifier. Measured on
+# qwen3.5:9b against a real scaffold diff, 2048 was not enough; it answered
+# within 1164 when given 8192.
+max_tokens = 8192
