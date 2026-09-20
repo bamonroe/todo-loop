@@ -152,3 +152,62 @@ test("blocking is reserved for genuinely impossible work", () => {
 	assert.match(prompt, /halts the whole queue/);
 	assert.doesNotMatch(prompt, /single atomic task, or cannot be broken down/);
 });
+
+/**
+ * A worker that could not compile wrote `min(...)` with no `import
+ * kotlin.math.min`, and nothing in the loop noticed until the verifier built it
+ * — two hours after the only model that could have fixed it had gone.
+ */
+const QUEUE_WITH_SIBLINGS = parseStore(`
+[[task]]
+id = "eq"
+title = "An equalizer app"
+level = "epic"
+status = "done"
+attempts = 0
+
+[[task]]
+id = "eq.bands"
+title = "Add band adaptation"
+parent = "eq"
+status = "doing"
+attempts = 0
+detail = "Write BandProfile.adapt."
+
+[[task]]
+id = "eq.ui"
+title = "Add the slider row"
+parent = "eq"
+status = "todo"
+attempts = 0
+detail = "A long sibling detail that must never reach the worker's window."
+`);
+
+test("the worker is given the commands the verifier will run", () => {
+	const prompt = renderAssignmentPrompt(QUEUE_WITH_SIBLINGS, QUEUE_WITH_SIBLINGS.tasks[1], {
+		mode: "standalone",
+		buildCommand: "build.sh :app:assembleDebug",
+		testCommand: "build.sh :app:testDebugUnitTest",
+	});
+	assert.match(prompt, /build\.sh :app:assembleDebug/);
+	assert.match(prompt, /build\.sh :app:testDebugUnitTest/);
+	assert.match(prompt, /cannot compile in your head/);
+	assert.match(prompt, /Do not finish on a failing build/);
+});
+
+test("no configured commands means no check block rather than an empty one", () => {
+	const prompt = renderAssignmentPrompt(QUEUE_WITH_SIBLINGS, QUEUE_WITH_SIBLINGS.tasks[1], { mode: "standalone" });
+	assert.doesNotMatch(prompt, /Check your work before you finish/);
+});
+
+test("sibling titles are handed over, sibling details are not", () => {
+	const prompt = renderAssignmentPrompt(QUEUE_WITH_SIBLINGS, QUEUE_WITH_SIBLINGS.tasks[1], { mode: "standalone" });
+	assert.match(prompt, /eq\.ui \[todo\] Add the slider row/);
+	assert.doesNotMatch(
+		prompt,
+		/never reach the worker's window/,
+		"handing over a sibling's detail costs more than the file read this replaces",
+	);
+	assert.match(prompt, /Do not open `todo\.toml`/);
+	assert.match(prompt, /Write BandProfile\.adapt/, "the worker's own detail still comes through in full");
+});

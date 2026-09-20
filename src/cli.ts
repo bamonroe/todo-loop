@@ -300,6 +300,8 @@ function commandNext(env: Env, flags: Flags): number {
 			maxAttempts: env.config.verify.max_attempts,
 			maxFiles: env.config.atomic.max_files,
 			minChildren: env.config.decompose.min_children,
+			buildCommand: env.config.verify.build_command,
+			testCommand: env.config.verify.test_command,
 		}),
 	);
 	return EXIT_OK;
@@ -494,6 +496,8 @@ export function findBlockMarker(output: string): string | undefined {
 interface PiRun {
 	code: number;
 	output: string;
+	/** The worker was killed for overrunning loop.worker_timeout_ms. */
+	timedOut?: boolean;
 }
 
 /**
@@ -543,6 +547,7 @@ function runPi(env: Env, prompt: string, dryRun: boolean): Promise<PiRun> {
 		// `loop.running` flag, so without this the session drives the loop too:
 		// every task verified and committed twice, then a failed attempt to
 		// replace a print mode session.
+		const budget = env.config.loop.worker_timeout_ms;
 		const child = spawn("pi", args, {
 			cwd: env.cwd,
 			stdio: ["ignore", "pipe", "inherit"],
@@ -557,7 +562,24 @@ function runPi(env: Env, prompt: string, dryRun: boolean): Promise<PiRun> {
 			console.error(`failed to launch pi: ${error.message}`);
 			resolve({ code: 127, output });
 		});
-		child.on("close", (code) => resolve({ code: code ?? EXIT_ERROR, output }));
+		// Kill an overrunning worker rather than letting one lost session spend the
+		// night. SIGTERM first so pi can wind down; SIGKILL if it will not.
+		let timedOut = false;
+		const timer = budget
+			? setTimeout(() => {
+					timedOut = true;
+					console.error(`worker exceeded loop.worker_timeout_ms (${budget}ms); stopping it`);
+					child.kill("SIGTERM");
+					setTimeout(() => child.kill("SIGKILL"), 10_000).unref();
+				}, budget)
+			: undefined;
+
+		child.on("close", (code) => {
+			if (timer) clearTimeout(timer);
+			// Reported as a failure, not as output: a half-written session that got
+			// cut off must not reach the verifier looking like finished work.
+			resolve({ code: timedOut ? EXIT_ERROR : (code ?? EXIT_ERROR), output, timedOut });
+		});
 	});
 }
 
@@ -613,6 +635,8 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 			maxAttempts: env.config.verify.max_attempts,
 			maxFiles: env.config.atomic.max_files,
 			minChildren: env.config.decompose.min_children,
+			buildCommand: env.config.verify.build_command,
+			testCommand: env.config.verify.test_command,
 		});
 
 		const kind = assignmentFor(task) === "decompose" ? `break down ${levelOf(task)}` : "implement";
@@ -634,7 +658,14 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 			return EXIT_ERROR;
 		}
 
-		const verdict = dryRun ? { pass: true, reason: "dry run" } : await verifyTask(env, current);
+		// A cut-off session is judged on the clock, not on its diff. Sending
+		// half-finished work to the verifier wastes a verification to be told what
+		// we already know, and a lucky pass would commit it.
+		const verdict = result.timedOut
+			? { pass: false, reason: `Worker exceeded loop.worker_timeout_ms (${env.config.loop.worker_timeout_ms}ms).` }
+			: dryRun
+				? { pass: true, reason: "dry run" }
+				: await verifyTask(env, current);
 		if (verdict.pass) {
 			markDone(env.store, current, verdict.reason);
 			persist();

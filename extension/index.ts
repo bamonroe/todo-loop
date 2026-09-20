@@ -47,6 +47,7 @@ import {
 	markDone,
 	markOverflow,
 	nextLeaf,
+	parentOf,
 	promoteToScope,
 	recordFailure,
 	renderTree,
@@ -57,6 +58,12 @@ import {
 	type TaskLevel,
 } from "../src/store.ts";
 import { checkDecomposition } from "../src/decompose.ts";
+
+/**
+ * The most a single todo_read relation may return. A breakdown of thirty
+ * children is legal; spending the worker's window on the list of them is not.
+ */
+const TODO_READ_MAX_ROWS = 12;
 import { completerFor } from "../src/providers.ts";
 import { verify, type Completer, type Verdict } from "../src/verify.ts";
 
@@ -284,6 +291,8 @@ export default function (pi: ExtensionAPI) {
 			maxAttempts: config.verify.max_attempts,
 			maxFiles: config.atomic.max_files,
 			minChildren: config.decompose.min_children,
+			buildCommand: config.verify.build_command,
+			testCommand: config.verify.test_command,
 		});
 
 		// A fresh session is a fresh budget; the previous task's overflow must not
@@ -499,6 +508,98 @@ export default function (pi: ExtensionAPI) {
 				details: { taskId: task.id, verdict, attempts },
 				usage,
 				isError: true,
+			};
+		},
+	});
+
+	/**
+	 * The queue was write-only before this: todo_add, todo_block and
+	 * todo_complete, with no way to look at anything. A worker that wants to know
+	 * whether a neighbouring task already covers something therefore reaches for
+	 * the file — observed in the wild as `awk '/id = "eq.add-system/...' todo.toml`
+	 * — which costs tokens to compose, tokens to read back, and lands whole
+	 * sibling details in a window that cannot afford them.
+	 *
+	 * Two bounds, because constraining the relation alone does not constrain the
+	 * context. The expensive axis is `detail`: the eight siblings in one real
+	 * breakdown carried two to three hundred words each, so a relation that
+	 * returned full records would pull more into the window than the awk it
+	 * replaces, and would feel sanctioned while doing it.
+	 *
+	 *   1. Only self, parent, children, siblings — never the whole queue.
+	 *   2. Only self carries `detail`. Everyone else is id, title, status, level.
+	 *
+	 * "Nobody's detail but your own" is enforced here rather than requested in the
+	 * prompt, because a rule a small model has to remember under context pressure
+	 * is a rule that breaks exactly when it matters.
+	 */
+	pi.registerTool({
+		name: "todo_read",
+		label: "Read Todo",
+		description:
+			"Look at the assigned task, or list its parent, children or siblings. Relations come back as titles and status only — read their code, not their queue entries. Use it to orient or to check for a duplicate before todo_add.",
+		promptSnippet: "Use todo_read to see the assigned task or list neighbouring tasks; never read todo.toml directly.",
+		parameters: Type.Object({
+			relation: Type.Optional(
+				Type.Union(
+					[Type.Literal("self"), Type.Literal("parent"), Type.Literal("children"), Type.Literal("siblings")],
+					{ description: "What to look at, relative to the assigned task. Defaults to self." },
+				),
+			),
+		}),
+
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			init(ctx);
+			const store = read();
+			const task = activeTask(store);
+			if (!task) {
+				return {
+					content: [{ type: "text", text: "No task is currently assigned." }],
+					details: {},
+					isError: true,
+				};
+			}
+
+			const relation = (params.relation ?? "self") as "self" | "parent" | "children" | "siblings";
+			if (relation === "self") {
+				const lines = [`${task.id} [${levelOf(task)}] ${task.status} — ${task.title}`];
+				if (task.detail) lines.push("", task.detail);
+				return {
+					content: [{ type: "text", text: lines.join("\n") }],
+					details: { relation, taskId: task.id },
+				};
+			}
+
+			const parentId = task.parent ?? parentOf(task, store.tasks);
+			let rows: Task[];
+			if (relation === "parent") {
+				const parent = parentId ? findTask(store, parentId) : undefined;
+				rows = parent ? [parent] : [];
+			} else if (relation === "children") {
+				rows = childrenOf(task.id, store.tasks);
+			} else {
+				// A root task has no parent, so its siblings are the other roots.
+				rows = (parentId ? childrenOf(parentId, store.tasks) : store.tasks.filter((row) => !row.parent)).filter(
+					(row) => row.id !== task.id,
+				);
+			}
+
+			if (!rows.length) {
+				return {
+					content: [{ type: "text", text: `${task.id} has no ${relation}.` }],
+					details: { relation, count: 0 },
+				};
+			}
+
+			// A breakdown may legally produce dozens of children; one tool call must
+			// not be able to spend the whole window on them.
+			const shown = rows.slice(0, TODO_READ_MAX_ROWS);
+			const lines = shown.map((row) => `${row.id} [${levelOf(row)}] ${row.status} — ${row.title}`);
+			if (rows.length > shown.length) lines.push(`… ${rows.length - shown.length} more not shown.`);
+			lines.push("", "Titles and status only — open their code if you need to know what they did.");
+			return {
+				content: [{ type: "text", text: lines.join("\n") }],
+				details: { relation, count: rows.length },
 			};
 		},
 	});

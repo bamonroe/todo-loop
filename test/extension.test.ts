@@ -11,7 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { beforeEach, test } from "node:test";
 import createExtension from "../extension/index.ts";
-import { loadStore } from "../src/store.ts";
+import { loadStore, saveStore } from "../src/store.ts";
 
 type Handler = (...args: never[]) => unknown;
 
@@ -163,7 +163,7 @@ beforeEach(() => {
 
 test("registers the documented commands and tools", () => {
 	assert.deepEqual([...h.commands.keys()].sort(), ["todo-advance", "todo-run", "todo-status", "todo-stop"]);
-	assert.deepEqual([...h.tools.keys()].sort(), ["todo_add", "todo_block", "todo_complete"]);
+	assert.deepEqual([...h.tools.keys()].sort(), ["todo_add", "todo_block", "todo_complete", "todo_read"]);
 	for (const event of ["before_agent_start", "context", "tool_result", "session_before_compact", "agent_settled"]) {
 		assert.ok(h.events.has(event), `missing handler for ${event}`);
 	}
@@ -608,4 +608,75 @@ test("under the shell driver the session defers completion instead of doing it t
 		if (saved === undefined) delete process.env.TODOLOOP_DRIVER;
 		else process.env.TODOLOOP_DRIVER = saved;
 	}
+});
+
+/** todo_read results, typed once so the assertions below stay readable. */
+const readTool = async (params: Record<string, unknown>) =>
+	(await call("todo_read", params)) as unknown as {
+		content: { text: string }[];
+		details: { count?: number };
+		isError?: boolean;
+	};
+
+/**
+ * The queue used to be write-only, so a worker that wanted to know what a
+ * neighbouring task covered read todo.toml with awk. These pin the two bounds
+ * that make the sanctioned route cheaper than that one.
+ */
+test("todo_read returns the assigned task in full", async () => {
+	await run("todo-run");
+	const result = await readTool({});
+	assert.equal(result.isError, undefined);
+	const text = result.content[0].text;
+	assert.match(text, /greet \[task\] doing/);
+	assert.match(text, /Create greet\.ts exporting greet\(name\)/, "self is the one task that carries its detail");
+});
+
+test("todo_read never hands over a neighbour's detail", async () => {
+	await run("todo-run");
+	const result = await readTool({ relation: "siblings" });
+	const text = result.content[0].text;
+	assert.match(text, /farewell \[task\] todo — Add a farewell function/);
+	assert.doesNotMatch(
+		text,
+		/Create greet\.ts exporting/,
+		"a relation listing must not carry any task's detail into the window",
+	);
+	assert.equal(result.details.count, 1, "siblings excludes the assigned task itself");
+});
+
+test("todo_read reports an empty relation rather than falling back to the whole queue", async () => {
+	await run("todo-run");
+	const result = await readTool({ relation: "children" });
+	assert.match(result.content[0].text, /greet has no children/);
+	assert.equal(result.details.count, 0);
+});
+
+test("todo_read caps a long relation", async () => {
+	await run("todo-run");
+	// Twenty siblings: legal for a breakdown, and more than one call should be
+	// able to spend the worker's window on.
+	const file = path.join(h.repo, "todo.toml");
+	const current = loadStore(file);
+	for (let i = 0; i < 20; i++) {
+		current.tasks.push({
+			id: `extra-${i}`,
+			title: `Extra ${i}`,
+			status: "todo",
+			attempts: 0,
+			detail: "a detail nobody else should ever see",
+		} as never);
+	}
+	saveStore(file, current);
+
+	const result = await readTool({ relation: "siblings" });
+	const text = result.content[0].text;
+	assert.match(text, /more not shown/);
+	assert.equal(text.split("\n").filter((line: string) => line.includes("[task]")).length, 12);
+	assert.doesNotMatch(text, /nobody else should ever see/);
+});
+
+test("todo_read refuses when nothing is assigned", async () => {
+	const result = await readTool({});
+	assert.equal(result.isError, true);
 });

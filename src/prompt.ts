@@ -32,6 +32,12 @@ export interface PromptOptions {
 	maxFiles?: number;
 	/** Smallest accepted breakdown. */
 	minChildren?: number;
+	/**
+	 * The same build and test commands the verifier will run. Handing them to the
+	 * worker is what turns a blind session into one with a compiler.
+	 */
+	buildCommand?: string;
+	testCommand?: string;
 }
 
 /**
@@ -169,6 +175,52 @@ export function renderDecomposePrompt(store: Store, task: Task, options: PromptO
 	return parts.join("\n\n");
 }
 
+/**
+ * The other leaves under the same parent, titles and status only.
+ *
+ * Never their `detail`: the eight siblings of one real breakdown carried two to
+ * three hundred words each, and pasting that into a small local window costs
+ * more than the file read this is meant to replace.
+ */
+function siblingTitles(store: Store, task: Task): string[] {
+	const parent = task.parent;
+	const rows = store.tasks.filter((row) => row.id !== task.id && (row.parent ?? "") === (parent ?? ""));
+	return rows.slice(0, 12).map((row) => `- ${row.id} [${row.status}] ${row.title}`);
+}
+
+/**
+ * The commands the verifier is about to run, handed to the worker so it can run
+ * them first.
+ *
+ * Before this the worker wrote code blind: `build_command` reached the verifier
+ * and nothing else, so the first compile of a task happened after the worker's
+ * session had already ended. A missing `import kotlin.math.min` — fifteen
+ * seconds of compiler time — instead cost a two-hour session and a rejection,
+ * because nothing in the loop could catch it while there was still a model
+ * around to fix it.
+ *
+ * `-q` matters more than it looks. A gradle build prints fifty lines of
+ * UP-TO-DATE task spam, and dumping that into a small window on every check
+ * would cost more context than the retry it saves. Quiet, a pass is one line and
+ * a failure is the compiler error alone.
+ */
+function verificationBlock(options: PromptOptions): string | undefined {
+	const commands = [options.buildCommand, options.testCommand].filter((command): command is string => !!command?.trim());
+	if (!commands.length) return undefined;
+	return [
+		"## Check your work before you finish",
+		"These are the exact commands the verifier will run on your diff. Run them yourself first and get them green.",
+		"",
+		"```",
+		...commands,
+		"```",
+		"",
+		"You cannot compile in your head: a missing import or a typo'd name looks correct when you read it back and fails instantly here. Run them, fix what they report, run again.",
+		"Add `-q` or pipe to `tail` if the output is long — you need the errors, not the task list.",
+		"Do not finish on a failing build. If you cannot get it green, say so rather than handing over code that does not compile.",
+	].join("\n");
+}
+
 export function renderTaskPrompt(store: Store, task: Task, options: PromptOptions): string {
 	const parts: string[] = [];
 	const chain = ancestryOf(store, task);
@@ -185,12 +237,36 @@ export function renderTaskPrompt(store: Store, task: Task, options: PromptOption
 		].join("\n"),
 	);
 
+	const neighbours = siblingTitles(store, task);
+	if (neighbours.length) {
+		// Handed over unasked, titles only. A worker with no idea what the
+		// neighbouring tasks are goes looking, and the only door it has is the
+		// queue file: one real session spent its window on
+		// `awk '/id = "eq.add-system/...' todo.toml`, pulling whole sibling
+		// details into a window that could not afford them. Fifty tokens here
+		// answers the question it was actually asking — is this mine or the next
+		// task's — and removes the motive.
+		parts.push(
+			[
+				"## The tasks around this one",
+				"Titles only, for boundaries. Work that belongs to another task is not yours to do, and not yours to fix.",
+				"",
+				...neighbours,
+				"",
+				"Do not open `todo.toml`. Use `todo_read` if you need this list again; it is the cheap version of the same thing.",
+			].join("\n"),
+		);
+	}
+
 	const rejected = rejectionBlock(
 		"Previous attempt was rejected",
 		options,
 		"Address exactly what is missing. Do not redesign work that was already accepted.",
 	);
 	if (rejected) parts.push(rejected);
+
+	const checks = verificationBlock(options);
+	if (checks) parts.push(checks);
 
 	parts.push(
 		options.mode === "tool"

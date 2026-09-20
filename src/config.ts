@@ -43,6 +43,21 @@ export interface Config {
 	loop: {
 		max_iterations: number;
 		/**
+		 * Wall-clock cap on a single worker session, 0 for none.
+		 *
+		 * Nothing bounded that session before: `verify.timeout_ms` covers the
+		 * verifier and the build commands, `max_attempts` and `max_iterations`
+		 * bound the work *between* tasks. One observed run spent two hours on a
+		 * single pure-function task and finished with code that did not compile,
+		 * and the whole night's budget went with it.
+		 *
+		 * Overrun correlates with the model being lost rather than being nearly
+		 * done, so cutting it is cheap. It costs nothing to be wrong about, either:
+		 * a killed worker is treated as an ordinary rejection, which reverts the
+		 * tree and retries with the overrun recorded.
+		 */
+		worker_timeout_ms: number;
+		/**
 		 * A ladder of strictness, each rung doing what the one below it does:
 		 * "off" ignores git, "commit" auto-commits each verified task, and
 		 * "require-clean" commits *and* refuses to start a task with a dirty tree.
@@ -155,6 +170,7 @@ export const DEFAULT_CONFIG: Config = {
 	},
 	loop: {
 		max_iterations: 50,
+		worker_timeout_ms: 0,
 		checkpoint: "require-clean",
 		commit_prefix: "todo",
 		on_silent_stop: "halt",
@@ -224,6 +240,7 @@ export function parseConfig(text: string): Config {
 	const context = section(doc, "context");
 	const ollama = section(doc, "ollama");
 
+	const workerTimeout = Math.max(0, pickNumber(loop, "worker_timeout_ms", DEFAULT_CONFIG.loop.worker_timeout_ms));
 	const checkpointRaw = pickString(loop, "checkpoint", DEFAULT_CONFIG.loop.checkpoint);
 	const checkpoint =
 		checkpointRaw === "commit" || checkpointRaw === "require-clean" || checkpointRaw === "off"
@@ -254,6 +271,7 @@ export function parseConfig(text: string): Config {
 		},
 		loop: {
 			max_iterations: pickNumber(loop, "max_iterations", DEFAULT_CONFIG.loop.max_iterations),
+			worker_timeout_ms: workerTimeout,
 			checkpoint,
 			commit_prefix: pickString(loop, "commit_prefix", DEFAULT_CONFIG.loop.commit_prefix),
 			on_silent_stop,

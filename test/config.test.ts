@@ -48,3 +48,10 @@ test("a bare reference is an ollama tag, a prefixed one is not", () => {
 	assert.equal(isLocalRef("ollama/qwen3.8-27b"), true);
 	assert.equal(isLocalRef("openai-codex/gpt-5.6-terra"), false);
 });
+
+test("worker_timeout_ms parses and defaults to no cap", () => {
+	assert.equal(parseConfig("").loop.worker_timeout_ms, 0);
+	assert.equal(parseConfig("[loop]\nworker_timeout_ms = 1800000\n").loop.worker_timeout_ms, 1800000);
+	// A negative budget would kill the worker on the first tick.
+	assert.equal(parseConfig("[loop]\nworker_timeout_ms = -5\n").loop.worker_timeout_ms, 0);
+});
