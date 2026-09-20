@@ -76,8 +76,8 @@ min_children = 2
 # only the size is in question.
 max_files = 5
 
-# What to do when a task overruns its budget — too many files, or compaction
-# firing inside a single task.
+# What to do when a task overruns its budget — too many files, compaction firing
+# inside a single task, or the worker using its whole clock without finishing.
 #   warn    record it on the task; `todo doctor` and `todo status` show it
 #   promote turn it into a scope so the next pass breaks it down
 #   off     ignore

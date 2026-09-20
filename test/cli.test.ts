@@ -199,14 +199,14 @@ test("the prompt stays behind the -- separator, whatever it starts with", () => 
  */
 async function planningRound(
 	script: string,
-	options: { loop?: string; extraTasks?: string } = {},
+	options: { loop?: string; extraTasks?: string; atomic?: string } = {},
 ): Promise<{ store: ReturnType<typeof loadStore>; stderr: string }> {
 	const repo = fs.mkdtempSync(path.join(os.tmpdir(), "todo-loop-round-"));
 	const bin = path.join(repo, "bin");
 	fs.mkdirSync(bin);
 	fs.writeFileSync(
 		path.join(repo, "todoloop.toml"),
-		`[models]\nworker = "ollama/fake"\nverifier = "ollama/fake"\n\n[loop]\ncheckpoint = "off"\n${options.loop ?? ""}`,
+		`[models]\nworker = "ollama/fake"\nverifier = "ollama/fake"\n\n[loop]\ncheckpoint = "off"\n${options.loop ?? ""}${options.atomic ?? ""}`,
 	);
 	fs.writeFileSync(
 		path.join(repo, "todo.toml"),
@@ -299,4 +299,50 @@ test("the project section parses and filters junk", () => {
 	const config = parseConfig('[project]\npackages = ["a", 3, ""]\nsetup_command = "boot-emulator"\nteardown_command = "kill-emulator"\n');
 	assert.deepEqual(config.project, { packages: ["a"], setup_command: "boot-emulator", teardown_command: "kill-emulator" });
 	assert.deepEqual(parseConfig("").project, { packages: [], setup_command: "", teardown_command: "" });
+});
+
+/**
+ * Run 10's ninety-minute dead end. An act timed out, came back with no file
+ * changes, timed out again and blocked the whole run. Promotion is exactly the
+ * remedy, and it never fired: overflow was only ever set from a finished diff's
+ * file count or from compaction, and a killed worker produces neither.
+ */
+test("an act that burns its whole budget is promoted rather than retried", async () => {
+	const { store, stderr } = await planningRound("sleep 5", {
+		loop: "worker_timeout_ms = 1500\n",
+		atomic: '\n[atomic]\non_overflow = "promote"\n',
+		extraTasks: `\n[[task]]\nid = "eq.wire"\ntitle = "Wire the screen to the engine"\nparent = "eq"\nlevel = "act"\nkind = "code"\nstatus = "todo"\nattempts = 0\n`,
+	});
+
+	const act = store.tasks.find((t) => t.id === "eq.wire");
+	assert.equal(act?.level, "plan", "the act becomes a plan so its next steps get decided");
+	assert.equal(act?.status, "todo", "and goes back in the queue");
+	assert.equal(act?.attempts, 0, "with the failed attempt cleared — it is not the same task any more");
+	assert.match(stderr, /promoted to plan/);
+});
+
+test("the overrun is recorded even when on_overflow only warns", async () => {
+	const { store } = await planningRound("sleep 5", {
+		loop: "worker_timeout_ms = 1500\n",
+		extraTasks: `\n[[task]]\nid = "eq.wire"\ntitle = "Wire the screen to the engine"\nparent = "eq"\nlevel = "act"\nkind = "code"\nstatus = "todo"\nattempts = 0\n`,
+	});
+
+	const act = store.tasks.find((t) => t.id === "eq.wire");
+	assert.equal(act?.overflowed, true, "the clock is a size signal like any other");
+	assert.match(act?.overflow_reason ?? "", /1500ms budget/);
+	assert.notEqual(act?.level, "plan", "but warn leaves the queue alone");
+	assert.equal(act?.attempts, 1);
+});
+
+test("a planning round that runs long is not treated as oversized", async () => {
+	// A short round is not a broken one — timedOutRound judges those on what they
+	// landed, and promoting a plan for running long would restructure the queue
+	// every time the planner was slow.
+	const { store } = await planningRound("sleep 5", {
+		loop: "plan_timeout_ms = 1500\n",
+		atomic: '\n[atomic]\non_overflow = "promote"\n',
+	});
+
+	const plan = store.tasks.find((t) => t.id === "eq");
+	assert.notEqual(plan?.overflowed, true);
 });

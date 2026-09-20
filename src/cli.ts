@@ -200,6 +200,28 @@ function noteOverflow(env: Env, task: Task, files: string[]): void {
 	markOverflow(task, `touched ${files.length} files (budget ${env.config.atomic.max_files})`);
 }
 
+/**
+ * Flag a leaf whose worker ran out of clock.
+ *
+ * Overflow had two sources, and both required the worker to *finish*: a diff
+ * wider than `atomic.max_files`, or compaction firing mid-task. A worker that
+ * spends its whole budget and gets killed produces neither — no diff, no
+ * compaction — so the task that proved it was too big was the one case nothing
+ * marked, and `on_overflow = "promote"` could never see it.
+ *
+ * Run 10 is the evidence. Its EqScreen act timed out, came back with no file
+ * changes, timed out again, and blocked the run after ninety minutes. Splitting
+ * it is exactly what promotion does, and the three attempts were each trying to
+ * do the split by hand and running out of time saying so.
+ *
+ * Unlike a wide diff this is not ambiguous. Wide work may be correct and only
+ * broad; work that never finished is not correct yet by definition.
+ */
+export function noteBudgetOverflow(env: Env, task: Task, budgetMs: number): void {
+	if (env.config.atomic.on_overflow === "off") return;
+	markOverflow(task, `worker used its whole ${budgetMs}ms budget without finishing`);
+}
+
 const USAGE = `todo — autonomous todo loop for pi
 
   todo init                      Write ${DEFAULT_CONFIG_FILE} and ${DEFAULT_STORE_FILE} starters
@@ -849,9 +871,16 @@ async function runLoop(
 			else console.error("  could not revert the working tree; the next iteration may refuse to start");
 		}
 
-		// A task that both overran its context budget and failed verification is
-		// far more likely to be too big than to be nearly right. Retrying the same
-		// oversized prompt two more times just spends tokens confirming that.
+		// A cut-off act is the strongest size signal there is, so record it here,
+		// where `live` is the row the promote check below actually reads. Planning
+		// rounds are exempt: a short round is not a broken one, timedOutRound()
+		// already judges those on what they landed.
+		if (result.timedOut && !planning) noteBudgetOverflow(env, live, budgetMs);
+
+		// A task that both overran its budget — files, compaction, or the clock —
+		// and failed verification is far more likely to be too big than to be
+		// nearly right. Retrying the same oversized prompt two more times just
+		// spends tokens confirming that.
 		if (
 			env.config.atomic.on_overflow === "promote" &&
 			live.overflowed &&
