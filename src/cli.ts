@@ -19,7 +19,7 @@ import {
 	type Config,
 } from "./config.ts";
 import { diagnose, formatChecks } from "./doctor.ts";
-import { commitAll, gatherEvidence, headCommit, isGitRepo, isTreeClean, loopOwnedPaths } from "./evidence.ts";
+import { commitAll, gatherEvidence, headCommit, isGitRepo, isTreeClean, loopOwnedPaths, revertTo } from "./evidence.ts";
 import { renderAssignmentPrompt } from "./prompt.ts";
 import { checkDecomposition } from "./decompose.ts";
 import {
@@ -646,6 +646,16 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 
 		const attempts = recordFailure(env.store, current, verdict.reason);
 		console.error(`✗ ${current.id} rejected (attempt ${attempts}/${env.config.verify.max_attempts}): ${verdict.reason}`);
+
+		// Undo the rejected attempt. This runs before any persist() below so the
+		// hard reset cannot roll back the failure it is reacting to: the store is
+		// written from memory afterwards. "off" means the caller manages the tree,
+		// so it manages the cleanup too.
+		if (!dryRun && env.config.loop.checkpoint !== "off") {
+			const base = env.store.loop.base_commit ?? "";
+			if (await revertTo(env.cwd, base)) console.error(`  reverted the working tree to ${base.slice(0, 7)}`);
+			else console.error("  could not revert the working tree; the next iteration may refuse to start");
+		}
 
 		// A task that both overran its context budget and failed verification is
 		// far more likely to be too big than to be nearly right. Retrying the same

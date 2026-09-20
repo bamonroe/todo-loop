@@ -302,3 +302,31 @@ export function formatEvidence(task: { id: string; title: string; detail?: strin
 	}
 	return sections.join("\n\n");
 }
+
+/**
+ * Throw away a failed attempt's edits so the next attempt starts from the same
+ * tree the first one did.
+ *
+ * Without this the retry path is dead code. `todo run` gates every iteration on
+ * a clean tree when `checkpoint = "require-clean"` — the default — but a
+ * rejected task's files are still on disk, so iteration N+1 sees the wreckage of
+ * iteration N and refuses to start. The loop then stops on the *first* failed
+ * verification, however many attempts `max_attempts` promised. Observed on a
+ * real run: one unresolved Kotlin reference ended a fourteen-iteration night at
+ * iteration two.
+ *
+ * Refuses to move HEAD. `base` is the commit the task started from, and at
+ * rejection time nothing has been committed, so it should already be HEAD; if it
+ * is not, something committed behind the loop's back and discarding it is not
+ * this function's call to make.
+ */
+export async function revertTo(cwd: string, base: string): Promise<boolean> {
+	if (!base) return false;
+	if ((await headCommit(cwd)) !== base) return false;
+	await git(cwd, ["reset", "--hard", base]);
+	// No -x: ignored files stay. The loop's own state file is gitignored in a
+	// well-set-up project, and deleting it mid-run would lose the attempt count
+	// this revert exists to make useful.
+	await git(cwd, ["clean", "-fd"]);
+	return true;
+}

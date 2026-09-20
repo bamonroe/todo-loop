@@ -12,6 +12,7 @@ import {
 	headCommit,
 	isTreeClean,
 	loopOwnedPaths,
+	revertTo,
 	runCommand,
 } from "../src/evidence.ts";
 
@@ -224,4 +225,73 @@ test("an excluded file first in the list does not cover an unexcluded one after 
 	assert.equal(await isTreeClean(repo, ["todo.toml", "src.ts"]), true);
 	fs.rmSync(path.join(repo, "src.ts"));
 	git("checkout", "--", "todo.toml");
+});
+
+/**
+ * The retry path is only real if a rejected attempt's edits go away. These use
+ * their own repo: the shared one above is mutated by every test in file order,
+ * and a hard reset in the middle of that would be a trap for the next author.
+ */
+test("reverting a rejected attempt restores the tree and lets the next one start", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "todo-loop-revert-"));
+	try {
+		const run = (...args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
+		run("init", "-q");
+		run("config", "user.email", "test@example.com");
+		run("config", "user.name", "Test");
+		fs.writeFileSync(path.join(dir, ".gitignore"), ".todoloop-state.toml\n");
+		fs.writeFileSync(path.join(dir, "Band.kt"), "val bands = 5\n");
+		run("add", "-A");
+		run("commit", "-qm", "initial");
+		const start = await headCommit(dir);
+
+		// What a worker leaves behind when its code does not compile: an edit, a
+		// new file, and the loop's own gitignored state.
+		fs.writeFileSync(path.join(dir, "Band.kt"), "val bands = min(5, 10)\n");
+		fs.writeFileSync(path.join(dir, "BandTest.kt"), "// broken\n");
+		fs.writeFileSync(path.join(dir, ".todoloop-state.toml"), "attempts = 1\n");
+		assert.equal(await isTreeClean(dir), false);
+
+		assert.equal(await revertTo(dir, start), true);
+
+		assert.equal(await isTreeClean(dir), true, "the next iteration's require-clean gate must pass");
+		assert.equal(fs.readFileSync(path.join(dir, "Band.kt"), "utf8"), "val bands = 5\n");
+		assert.equal(fs.existsSync(path.join(dir, "BandTest.kt")), false);
+		assert.equal(await headCommit(dir), start, "revert must not move HEAD");
+		assert.equal(
+			fs.existsSync(path.join(dir, ".todoloop-state.toml")),
+			true,
+			"clean without -x: losing the attempt count would defeat the retry this enables",
+		);
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("revert refuses when something committed behind the loop's back", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "todo-loop-revert-head-"));
+	try {
+		const run = (...args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
+		run("init", "-q");
+		run("config", "user.email", "test@example.com");
+		run("config", "user.name", "Test");
+		fs.writeFileSync(path.join(dir, "a.txt"), "one\n");
+		run("add", "-A");
+		run("commit", "-qm", "initial");
+		const start = await headCommit(dir);
+
+		fs.writeFileSync(path.join(dir, "a.txt"), "two\n");
+		run("add", "-A");
+		run("commit", "-qm", "someone else committed");
+		fs.writeFileSync(path.join(dir, "a.txt"), "three\n");
+
+		assert.equal(await revertTo(dir, start), false, "discarding an unexpected commit is not this function's call");
+		assert.equal(fs.readFileSync(path.join(dir, "a.txt"), "utf8"), "three\n");
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("revert with no base commit is a no-op", async () => {
+	assert.equal(await revertTo(repo, ""), false);
 });
