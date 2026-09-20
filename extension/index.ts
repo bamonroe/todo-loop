@@ -316,6 +316,7 @@ export default function (pi: ExtensionAPI) {
 			maxDepth: config.plan.max_depth,
 			memoryFile: config.plan.memory_file,
 			buildCommand: config.verify.build_command,
+			workerCheck: config.verify.worker_check,
 			testCommand: config.verify.test_command,
 		});
 

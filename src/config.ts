@@ -36,6 +36,20 @@ export interface Config {
 		max_attempts: number;
 		test_command: string;
 		build_command: string;
+		/**
+		 * How the *worker* is told to check its own work, when that is not just
+		 * running the verifier's commands.
+		 *
+		 * `build_command` and `test_command` are how the verifier checks the
+		 * worker. Pasting them into the worker's prompt conflates the two, and
+		 * where the project provides tools it is actively worse: the worker gets
+		 * a shell command competing with a tool that does the same job better,
+		 * and raw command output costs more context than the retry it saves.
+		 *
+		 * Set this to name the tools. Left empty, the commands are named instead,
+		 * which is the right fallback for a project with no tooling of its own.
+		 */
+		worker_check: string;
 		require_tests_pass: boolean;
 		max_evidence_bytes: number;
 		timeout_ms: number;
@@ -212,6 +226,7 @@ export const DEFAULT_CONFIG: Config = {
 		max_attempts: 3,
 		test_command: "",
 		build_command: "",
+		worker_check: "",
 		require_tests_pass: true,
 		max_evidence_bytes: 12000,
 		timeout_ms: 300000,
@@ -324,6 +339,7 @@ export function parseConfig(text: string): Config {
 			max_attempts: Math.max(1, pickNumber(verify, "max_attempts", DEFAULT_CONFIG.verify.max_attempts)),
 			test_command: pickString(verify, "test_command", DEFAULT_CONFIG.verify.test_command),
 			build_command: pickString(verify, "build_command", DEFAULT_CONFIG.verify.build_command),
+			worker_check: pickString(verify, "worker_check", DEFAULT_CONFIG.verify.worker_check),
 			require_tests_pass: pickBool(verify, "require_tests_pass", DEFAULT_CONFIG.verify.require_tests_pass),
 			max_evidence_bytes: pickNumber(verify, "max_evidence_bytes", DEFAULT_CONFIG.verify.max_evidence_bytes),
 			timeout_ms: pickNumber(verify, "timeout_ms", DEFAULT_CONFIG.verify.timeout_ms),

@@ -326,6 +326,7 @@ function commandNext(env: Env, flags: Flags): number {
 			maxDepth: env.config.plan.max_depth,
 			memoryFile: env.config.plan.memory_file,
 			buildCommand: env.config.verify.build_command,
+			workerCheck: env.config.verify.worker_check,
 			testCommand: env.config.verify.test_command,
 		}),
 	);
@@ -674,6 +675,7 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 			maxDepth: env.config.plan.max_depth,
 			memoryFile: env.config.plan.memory_file,
 			buildCommand: env.config.verify.build_command,
+			workerCheck: env.config.verify.worker_check,
 			testCommand: env.config.verify.test_command,
 		});
 

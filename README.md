@@ -480,6 +480,16 @@ matter most:
   check rejects, loses its half-batch. A timeout can never close a plan — an
   empty round means "no next step" when the planner says it, and means the
   stopwatch when the clock does.
+- `verify.worker_check` — how the *worker* is told to check its own work.
+  `build_command` and `test_command` are how the verifier checks the worker;
+  pasting them into the worker's prompt conflates the two, and where the
+  project has tools it is worse than that — the worker gets a shell command
+  competing with a tool that does the same job better, and raw command output
+  costs more context than the retry it saves. Set this to name the tools. Left
+  empty, the commands are named instead, which is all a project without
+  tooling has to go on. Either way the rule is the same and is the part that
+  matters: you cannot compile in your head, and do not finish on a failing
+  build.
 - `atomic.max_files` / `atomic.on_overflow` — the bottom-level size budget and
   what to do when a task blows through it. See
   [Keeping the bottom level atomic](#keeping-the-bottom-level-atomic).

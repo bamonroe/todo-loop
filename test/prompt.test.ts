@@ -289,3 +289,33 @@ test("an act is pointed at the memory file, not just told to write it", () => {
 test("no memory file configured means no block about one", () => {
 	assert.doesNotMatch(renderAssignmentPrompt(store, task, { mode: "tool" }), /What earlier sessions worked out/);
 });
+
+test("worker_check replaces the raw commands rather than joining them", () => {
+	// Where the project has tools, pasting the verifier's shell commands into
+	// the worker's prompt gives it two ways to do one job — and the worse one
+	// costs more context than the retry it saves.
+	const prompt = renderActPrompt(store, task, {
+		mode: "tool",
+		buildCommand: "BAM_STORE_PUBLISH=0 /data/android/build.sh /data/equalizer :app:assembleDebug",
+		testCommand: "BAM_STORE_PUBLISH=0 /data/android/build.sh /data/equalizer :app:testDebugUnitTest",
+		workerCheck: "Use android_build and android_test.",
+	});
+
+	assert.match(prompt, /Use android_build and android_test\./);
+	assert.doesNotMatch(prompt, /build\.sh/, "the shell commands are the verifier's business, not the worker's");
+	assert.doesNotMatch(prompt, /pipe to `tail`/, "a tool already shapes its own output");
+	// The rule survives either way; it is the part that matters.
+	assert.match(prompt, /cannot compile in your head/);
+	assert.match(prompt, /Do not finish on a failing build/);
+});
+
+test("with no worker_check the commands are still named", () => {
+	// A project with no tooling of its own has nothing else to go on.
+	const prompt = renderActPrompt(store, task, {
+		mode: "tool",
+		buildCommand: "make build",
+		testCommand: "make test",
+	});
+	assert.match(prompt, /make build/);
+	assert.match(prompt, /make test/);
+});

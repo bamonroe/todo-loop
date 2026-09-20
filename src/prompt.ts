@@ -54,6 +54,7 @@ export interface PromptOptions {
 	 * worker is what turns a blind session into one with a compiler.
 	 */
 	buildCommand?: string;
+	workerCheck?: string;
 	testCommand?: string;
 }
 
@@ -292,19 +293,40 @@ function siblingTitles(store: Store, task: Task): string[] {
  * would cost more context than the retry it saves. Quiet, a pass is one line and
  * a failure is the compiler error alone.
  */
+/**
+ * Tell the worker to check its work — without telling it how, where the
+ * project already has something better.
+ *
+ * `worker_check` names the project's own affordance (its tools). Otherwise the
+ * verifier's commands are named, which is all a project with no tooling has.
+ * The rule is the same either way and is the part that matters: a model cannot
+ * compile in its head, and must not finish on a failing build.
+ */
 function verificationBlock(options: PromptOptions): string | undefined {
+	const guidance = options.workerCheck?.trim();
 	const commands = [options.buildCommand, options.testCommand].filter((command): command is string => !!command?.trim());
-	if (!commands.length) return undefined;
+	if (!guidance && !commands.length) return undefined;
+
+	const how = guidance
+		? [guidance]
+		: [
+				"These are the exact commands the verifier will run on your diff. Run them yourself first and get them green.",
+				"",
+				"```",
+				...commands,
+				"```",
+				"",
+				// Only meaningful for a raw command. A tool that shapes its own
+				// output has already done this, and saying it anyway invites the
+				// worker to pipe a tool result through tail.
+				"Add `-q` or pipe to `tail` if the output is long — you need the errors, not the task list.",
+			];
+
 	return [
 		"## Check your work before you finish",
-		"These are the exact commands the verifier will run on your diff. Run them yourself first and get them green.",
+		...how,
 		"",
-		"```",
-		...commands,
-		"```",
-		"",
-		"You cannot compile in your head: a missing import or a typo'd name looks correct when you read it back and fails instantly here. Run them, fix what they report, run again.",
-		"Add `-q` or pipe to `tail` if the output is long — you need the errors, not the task list.",
+		"You cannot compile in your head: a missing import or a typo'd name looks correct when you read it back and fails instantly here. Check, fix what it reports, check again.",
 		"Do not finish on a failing build. If you cannot get it green, say so rather than handing over code that does not compile.",
 	].join("\n");
 }
