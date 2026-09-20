@@ -590,6 +590,15 @@ test("under the shell driver the session defers completion instead of doing it t
 		// No advance queued: there is no session for the driver's successor to replace.
 		assert.deepEqual(shell.sent.filter((m) => m.text === "/todo-advance"), []);
 
+		// The task stays "doing" until the driver rules, so agent_settled must not
+		// read that as a run that ended without completing — doing so halts the
+		// queue on finished work.
+		for (const handler of shell.events.get("agent_start") ?? [])
+			await (handler as (e: unknown, c: unknown) => Promise<void>)({}, shell.ctx);
+		const settled = shell.events.get("agent_settled") ?? [];
+		for (const handler of settled) await (handler as (e: unknown, c: unknown) => Promise<void>)({}, shell.ctx);
+		assert.equal(loadStore(path.join(shell.repo, "todo.toml")).loop.running, true);
+
 		// /todo-advance must be inert here: replacing the session is the driver's
 		// job, done by starting a new process.
 		const before = shell.newSessions.length;

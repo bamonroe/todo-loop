@@ -781,6 +781,13 @@ export default function (pi: ExtensionAPI) {
 	 */
 	pi.on("agent_settled", async (_event, ctx) => {
 		init(ctx);
+		// Under the shell driver every session ends with the task still marked
+		// doing, because the driver — not the session — rules on it once the
+		// process exits. Reading that as a silent stop halts the whole queue on
+		// a task that was in fact finished and is about to be verified. The
+		// driver needs no help here: it verifies the diff whether or not
+		// todo_complete was ever called.
+		if (shellDriven) return;
 		if (!sawAgentStart) return;
 
 		const store = read();
