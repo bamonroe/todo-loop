@@ -161,6 +161,33 @@ function progressRule(budget: number, memoryFile?: string): string {
 }
 
 /**
+ * Two facts the worker cannot observe from inside its own session: that nobody
+ * is coming, and that an impossible requirement has a sanctioned answer other
+ * than stopping.
+ *
+ * The second half is the load-bearing one. One real planning round worked out,
+ * correctly and at length, that the project it had been handed could not be
+ * built as described — and then spent the rest of its window relitigating that
+ * finding, because the prompt gave it nowhere to put it. Substituting the
+ * nearest workable thing and recording the swap is the outcome we want; the
+ * guard rails exist because this model is much better at deciding something is
+ * impossible than at establishing it.
+ */
+function unattendedRule(options: PromptOptions): string {
+	const record = options.memoryFile ? `write it into \`${options.memoryFile}\`` : "say so plainly in your summary";
+	const block = options.mode === "tool" ? "`todo_block`" : "`BLOCKED:`";
+	return [
+		"## Nobody is watching this run",
+		"This loop runs unattended. There is no one to ask and no one to approve anything. A question you stop on is a question that stays unanswered until a human happens to look, which may be hours from now or after the queue has emptied itself.",
+		"",
+		`So decide, and keep going. Where something turns out to be impossible as written, take the nearest thing that does work and broadly serves the same goal, then ${record}: what was asked, why it cannot be done, and what you did instead. A recorded substitution is a good outcome. Stopping is not, and neither is quietly building something narrower and leaving the next session to discover it.`,
+		"",
+		"**Impossible is a high bar and a rare finding.** A build that will not pass, an API you have not used before, an error you do not yet understand and a design you cannot see the end of are all ordinary work — they are not grounds for substituting something easier, and this is not a licence to take the easy road on anything merely hard. If you have not actually established that it cannot be done, it can.",
+		`${block} is for when there is no workable substitute at all — not for when the only one available is unsatisfying.`,
+	].join("\n");
+}
+
+/**
  * The prompt for a plan: decide the next few steps, write them down, stop.
  *
  * The instruction not to write code is backed by a mechanical check — a
@@ -222,6 +249,7 @@ export function renderPlanPrompt(store: Store, task: Task, options: PromptOption
 
 	parts.push(progressRule(budget, options.memoryFile));
 	parts.push(atomicityRules(maxFiles));
+	parts.push(unattendedRule(options));
 
 	parts.push(
 		options.mode === "tool"
@@ -378,6 +406,8 @@ export function renderActPrompt(store: Store, task: Task, options: PromptOptions
 			`This task is meant to be atomic: roughly ${options.maxFiles ?? 5} files at most, finishable in this one session. If it turns out to be much larger than that, say so rather than pushing through — a task that does not fit is a queue bug, and reporting it is more useful than half-finishing it.`,
 		].join("\n"),
 	);
+
+	parts.push(unattendedRule(options));
 
 	const neighbours = siblingTitles(store, task);
 	if (neighbours.length) {

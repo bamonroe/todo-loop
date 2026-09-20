@@ -331,3 +331,34 @@ test("with no worker_check the commands are still named", () => {
 	assert.match(prompt, /make build/);
 	assert.match(prompt, /make test/);
 });
+
+// ------------------------------------------------- the unattended-run rule
+
+test("both prompts say the run is unattended and offer a recorded substitution", () => {
+	const opts = { ...PLAN_OPTS, memoryFile: "NOTES.md" };
+	const planned = renderAssignmentPrompt(plan, plan.tasks[0], opts);
+	const acted = renderActPrompt(store, task, opts);
+
+	for (const prompt of [planned, acted]) {
+		assert.match(prompt, /Nobody is watching this run/);
+		assert.match(prompt, /no one to ask/);
+		// The escape hatch: substitute, do not stop, and do not narrow in silence.
+		assert.match(prompt, /nearest thing that does work/);
+		assert.match(prompt, /write it into `NOTES\.md`/);
+		assert.match(prompt, /quietly building something narrower/);
+		// ...and its guard rail, so it is not a licence to take the easy road.
+		assert.match(prompt, /Impossible is a high bar/);
+		assert.match(prompt, /not grounds for substituting something easier/);
+		// Blocking stays the last resort, named in the mode's own vocabulary.
+		assert.match(prompt, /`todo_block` is for when there is no workable substitute/);
+	}
+});
+
+test("the unattended rule speaks the standalone driver's vocabulary", () => {
+	const prompt = renderAssignmentPrompt(plan, plan.tasks[0], { ...PLAN_OPTS, mode: "standalone" });
+	assert.match(prompt, /`BLOCKED:` is for when there is no workable substitute/);
+	assert.doesNotMatch(prompt, /`todo_block` is for when there is no workable/);
+	// No memory file configured, so the substitution is recorded in the summary.
+	assert.match(prompt, /say so plainly in your summary/);
+	assert.doesNotMatch(prompt, /Where something turns out to be impossible as written[^]*?write it into/);
+});
