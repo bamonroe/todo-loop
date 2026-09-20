@@ -140,8 +140,66 @@ status = "done"
 attempts = 0
 `);
 	const later = renderAssignmentPrompt(store, store.tasks[0], PLAN_OPTS);
-	assert.match(later, /add nothing at all/);
-	assert.match(later, /An empty round is how a branch closes/);
+	assert.match(later, /add nothing/);
+	assert.match(later, /empty round is how a branch closes/);
+});
+
+test("closing is gated on pointing at work, not on an empty queue", () => {
+	const store = parseStore(`
+[[task]]
+id = "auth"
+title = "Rebuild authentication"
+level = "plan"
+status = "todo"
+attempts = 0
+
+[[task]]
+id = "auth.init"
+title = "Initialise the repository"
+parent = "auth"
+status = "done"
+attempts = 0
+`);
+	const prompt = renderAssignmentPrompt(store, store.tasks[0], PLAN_OPTS);
+	// The gate: an empty queue is not the criterion, the goal is.
+	assert.match(prompt, /an empty queue is not evidence of a met goal/);
+	// Both criterion classes, each with its anchor.
+	assert.match(prompt, /checkable parts .* need their check named/);
+	assert.match(prompt, /good-faith parts .* need the work named/);
+	// Naming nothing reopens the branch instead of closing it.
+	assert.match(prompt, /name nothing for is not done — it becomes this round's items/);
+	// The accounting is the human handoff.
+	assert.match(prompt, /what a human reads to decide what to check first/);
+});
+
+test("a root plan's first round derives acceptance criteria into the memory file", () => {
+	const opts = { ...PLAN_OPTS, memoryFile: "NOTES.md" };
+	const root = renderAssignmentPrompt(plan, plan.tasks[0], opts);
+	assert.match(root, /"Acceptance" section into `NOTES\.md`/);
+	assert.match(root, /`checkable` \(a test or command can decide it\)/);
+	assert.match(root, /`good-faith` \(the user asked for effort, not a measurement\)/);
+
+	// A child plan's first round does not re-derive them...
+	const child = parseStore(`
+[[task]]
+id = "auth"
+title = "Rebuild authentication"
+level = "plan"
+status = "doing"
+
+[[task]]
+id = "auth.ui"
+title = "Plan the UI"
+parent = "auth"
+level = "plan"
+status = "todo"
+attempts = 0
+`);
+	const childPrompt = renderAssignmentPrompt(child, child.tasks[1], opts);
+	assert.doesNotMatch(childPrompt, /"Acceptance" section/);
+
+	// ...and without a memory file there is nowhere to put them.
+	assert.doesNotMatch(renderAssignmentPrompt(plan, plan.tasks[0], PLAN_OPTS), /"Acceptance" section/);
 });
 
 test("the progress rule names the research allowance it has left", () => {

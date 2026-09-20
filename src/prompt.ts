@@ -318,9 +318,25 @@ export function renderPlanPrompt(store: Store, task: Task, options: PromptOption
 			"",
 			"## Finishing",
 			v.finishPlan,
-			hasDone
-				? "If this item is genuinely finished — everything under it is done and there is no next step — add nothing at all and say so in the summary. An empty round is how a branch closes."
-				: "This is the first round, so it has to produce work: an empty round will be rejected.",
+			// The closing gate. Observed without it: nine tasks in, a ProfileStore
+			// with 134 lines of tests and no queued task for the profile UI — the
+			// headline feature half-built and the planner not noticing, because an
+			// empty queue reads as "nothing left to do". Closing is a comparison
+			// against the goal, and pointing at work is the anchor: asked whether a
+			// good-faith effort was made, a model always says yes; asked to *name*
+			// the task or file that made it, it either can or it cannot.
+			...(hasDone
+				? [
+						'If this item looks finished, check that against what was asked, not against the queue — an empty queue is not evidence of a met goal. The goal is the text at the top of this prompt. For each part of it, name the task or file that addressed it: checkable parts ("profiles save and load") need their check named, good-faith parts ("make it look good") need the work named, and a part you can name nothing for is not done — it becomes this round\'s items. Only when every part has something to point to, add nothing, and put that accounting in the summary: it is what a human reads to decide what to check first. That empty round is how a branch closes.',
+					]
+				: [
+						"This is the first round, so it has to produce work: an empty round will be rejected.",
+						...(!task.parent && options.memoryFile
+							? [
+									`Because this is the root of the project, make the first item a \`docs\` act that writes an "Acceptance" section into \`${options.memoryFile}\` — one line per requirement in the goal above, each tagged \`checkable\` (a test or command can decide it) or \`good-faith\` (the user asked for effort, not a measurement). Closing rounds point at work line by line against that list, so write each line as something one can point at.`,
+								]
+							: []),
+					]),
 			`Only ${v.blockVerb} if you cannot plan at all — missing information, a contradiction, a broken precondition. It halts the whole queue for a human, so it is not the way to say "this is smaller than it looked".`,
 		].join("\n"),
 	);
