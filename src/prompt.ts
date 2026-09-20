@@ -315,6 +315,20 @@ export function renderActPrompt(store: Store, task: Task, options: PromptOptions
 	parts.push(`# ${kind === "research" ? "Research" : kind === "docs" ? "Documentation" : "Task"} ${task.id}\n\n${task.title}`);
 	if (task.detail) parts.push(task.detail.trim());
 
+	// The memory file is only worth writing if it is also read. A research act
+	// that files a finding nobody is told to look at has produced a diff and
+	// nothing else — which is how every session ends up re-deriving the same
+	// facts about the toolchain, one expensive exploration at a time.
+	if (options.memoryFile) {
+		parts.push(
+			[
+				"## What earlier sessions worked out",
+				`\`${options.memoryFile}\` is where previous sessions wrote what they found out — commands that work, paths, constraints, things that turned out not to be true. Read it before you start.`,
+				"It is the only memory this project has. If you learn something durable while doing this task — an incantation that works, a version that does not — append it there as well.",
+			].join("\n"),
+		);
+	}
+
 	// A research act still has to leave a diff behind — the evidence check
 	// rejects an empty one. That is deliberate: "I went and read some things" is
 	// not a deliverable, and the next session cannot read a session that ended.

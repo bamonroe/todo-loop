@@ -275,3 +275,17 @@ test("sibling titles are handed over, sibling details are not", () => {
 	assert.match(prompt, /Write BandProfile\.adapt/, "the worker's own detail still comes through in full");
 });
 
+
+test("an act is pointed at the memory file, not just told to write it", () => {
+	// A finding filed where nobody is told to look has produced a diff and
+	// nothing else, which is how every session re-derives the same toolchain
+	// facts one expensive exploration at a time.
+	const prompt = renderAssignmentPrompt(store, task, { mode: "tool", memoryFile: "NOTES.md" });
+	assert.match(prompt, /What earlier sessions worked out/);
+	assert.match(prompt, /`NOTES\.md` is where previous sessions wrote what they found out/);
+	assert.match(prompt, /Read it before you start/);
+});
+
+test("no memory file configured means no block about one", () => {
+	assert.doesNotMatch(renderAssignmentPrompt(store, task, { mode: "tool" }), /What earlier sessions worked out/);
+});
