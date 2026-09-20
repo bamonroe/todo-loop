@@ -563,3 +563,40 @@ test("a breakdown carries its children across compaction", async () => {
 	assert.match(result.compaction.summary, /Do not re-add children/);
 	assert.match(result.compaction.summary, /Write no code/);
 });
+
+test("under the shell driver the session defers completion instead of doing it twice", async () => {
+	// `todo run` and bin/todo-loop.sh verify, commit and advance in the driver
+	// process. Both sides read the same loop.running flag, so without the
+	// TODOLOOP_DRIVER signal the session repeats all three: two verifier calls
+	// per task, two commits, and then /todo-advance trying to replace a print
+	// mode session that is already exiting.
+	const saved = process.env.TODOLOOP_DRIVER;
+	process.env.TODOLOOP_DRIVER = "shell";
+	try {
+		const shell = build();
+		await shell.commands.get("todo-run")!("", shell.commandCtx);
+		fs.writeFileSync(path.join(shell.repo, "greet.ts"), "export const greet = () => 'hi';\n");
+
+		const result = await shell.tools
+			.get("todo_complete")!
+			.execute("id" as never, { summary: "added greet.ts" } as never, undefined as never, undefined as never, shell.ctx as never);
+
+		assert.equal(result.terminate, true);
+		assert.equal((result.details as { deferred?: boolean }).deferred, true);
+
+		// The driver rules on it, so the session must not have closed it here.
+		const current = loadStore(path.join(shell.repo, "todo.toml"));
+		assert.equal(current.tasks[0].status, "doing");
+		// No advance queued: there is no session for the driver's successor to replace.
+		assert.deepEqual(shell.sent.filter((m) => m.text === "/todo-advance"), []);
+
+		// /todo-advance must be inert here: replacing the session is the driver's
+		// job, done by starting a new process.
+		const before = shell.newSessions.length;
+		await shell.commands.get("todo-advance")!("", shell.commandCtx);
+		assert.equal(shell.newSessions.length, before);
+	} finally {
+		if (saved === undefined) delete process.env.TODOLOOP_DRIVER;
+		else process.env.TODOLOOP_DRIVER = saved;
+	}
+});

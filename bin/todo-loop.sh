@@ -26,7 +26,9 @@ for ((i = 1; i <= max; i++)); do
 	# --approve: print mode never asks about project trust, and without the flag
 	# it silently skips the project's own .pi/settings.json. See workerArgs in
 	# src/cli.ts for why that file matters on a small context window.
-	pi -p --approve -- "$prompt" </dev/null || echo "pi exited non-zero; verifying anyway" >&2
+	# TODOLOOP_DRIVER: this script owns the loop, so the in-session extension
+	# must not verify, commit or advance on top of it.
+	TODOLOOP_DRIVER=shell pi -p --approve -- "$prompt" </dev/null || echo "pi exited non-zero; verifying anyway" >&2
 
 	if "$todo" complete "$id"; then
 		continue

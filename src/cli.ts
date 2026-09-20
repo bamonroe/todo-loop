@@ -539,7 +539,15 @@ function runPi(env: Env, prompt: string, dryRun: boolean): Promise<PiRun> {
 		// prompt, so an inherited pipe makes it hang with the model loaded and idle.
 		// stdout is piped so the run can be read for a BLOCKED marker, and echoed
 		// so it still streams.
-		const child = spawn("pi", args, { cwd: env.cwd, stdio: ["ignore", "pipe", "inherit"] });
+		// Tell the extension which side of the loop it is on. Both read the same
+		// `loop.running` flag, so without this the session drives the loop too:
+		// every task verified and committed twice, then a failed attempt to
+		// replace a print mode session.
+		const child = spawn("pi", args, {
+			cwd: env.cwd,
+			stdio: ["ignore", "pipe", "inherit"],
+			env: { ...process.env, TODOLOOP_DRIVER: "shell" },
+		});
 		let output = "";
 		child.stdout?.on("data", (chunk: Buffer) => {
 			output += chunk.toString();

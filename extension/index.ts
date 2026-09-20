@@ -109,6 +109,18 @@ export default function (pi: ExtensionAPI) {
 	let storeFile = "";
 	let initialised = false;
 
+	/**
+	 * True when this session was spawned by the shell driver (`todo run` or
+	 * bin/todo-loop.sh), which sets TODOLOOP_DRIVER=shell.
+	 *
+	 * Both drivers read the same `loop.running` flag, so without this the
+	 * extension tries to drive a loop the driver is already driving: the task is
+	 * verified twice and committed twice, and `/todo-advance` then attempts to
+	 * replace a print mode session, which throws a stale-context error. One loop,
+	 * one owner.
+	 */
+	const shellDriven = process.env.TODOLOOP_DRIVER === "shell";
+
 	/** Did an agent run actually happen in this session? Guards the silent-stop check. */
 	let sawAgentStart = false;
 	/**
@@ -331,6 +343,10 @@ export default function (pi: ExtensionAPI) {
 		description: "Internal: start the next task in a fresh session",
 		handler: async (_args, ctx) => {
 			init(ctx);
+			// The shell driver advances by starting a new process, so there is no
+			// session for this to replace — attempting it throws a stale-context
+			// error once the print mode session is on its way out.
+			if (shellDriven) return;
 			if (!read().loop.running) return;
 			await ctx.waitForIdle();
 			await startNext(ctx);
@@ -388,6 +404,25 @@ export default function (pi: ExtensionAPI) {
 					content: [{ type: "text", text: "No task is currently assigned; nothing to complete." }],
 					details: {},
 					isError: true,
+				};
+			}
+
+			// The shell driver owns the loop: it verifies, checkpoints and starts
+			// the next task in a new process. Doing any of that here as well would
+			// verify every task twice — two metered calls per task on a hosted
+			// verifier — commit it twice, and then fail trying to replace a print
+			// mode session that is about to exit anyway. Record the claim and let
+			// the driver rule on it.
+			if (shellDriven) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Recorded ${task.id} as finished. The loop driver verifies it against the diff and the test output after this session exits.`,
+						},
+					],
+					details: { taskId: task.id, deferred: true },
+					terminate: true,
 				};
 			}
 
