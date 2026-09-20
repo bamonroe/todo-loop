@@ -1,0 +1,162 @@
+# todo-loop harness findings
+
+What running the loop against a real project has taught us about the harness
+around it. The project under test is an Android graphic equalizer at
+`/data/equalizer`, built by `qwen3.8-27b` locally with `qwen3.5-plus` verifying.
+
+Every finding here came from running the thing. None came from reading the code
+— in each case the code looked correct.
+
+---
+
+## 1. Deliberation, not looking, is the bottleneck
+
+Run 7 spent its entire ten-minute planning window on three thinking blocks
+totalling 29,746 characters, and landed one item at 8:55. All three derived the
+same five-item plan from scratch. Nothing on disk changed between them. Two
+questions were re-litigated in every block, and one of them flip-flopped.
+
+The look budget — six inspection commands — was not the constraint. The planner
+used three of them.
+
+At 10-12 tokens/second, thinking is the most expensive thing a session can
+spend and the first thing lost when it ends early.
+
+**There is no "think less" lever.** Tested empirically, one prompt per level
+against the local model: `--thinking off` produced 0 thinking characters, `low`
+produced 623, `max` produced 719. pi maps the graded levels to
+`reasoning_effort`, which ollama ignores. Only the on/off toggle reaches the
+model. So prompt wording is the only control we have.
+
+## 2. Telling it what it may skip beats telling it what to prefer
+
+`dda1275` rewrote the plan prompt. The old text already said to prefer plans and
+to keep deliberation short, and run 7 quoted that rule back to itself and argued
+past it.
+
+What changed things was removing a demand rather than adding an instruction:
+
+> Put what the worker will need in `detail` — it is the only context that item
+> will ever have. **But write it in one pass.** If you cannot fill it in without
+> working the design out first, that is a `plan`, not an act you deliberate into
+> shape.
+
+Requiring a perfect `detail` on every item is what made each item worth agonising
+over. Run 8, same cap and same baseline: 13,638 thinking characters, five items,
+first write at 2:49, and plan children appeared for the first time at scale.
+
+## 3. Prompt text is not free
+
+`17c047f` added the unattended-run block to both prompts. Planning thinking went
+from 13,638 (run 8) to 19,625 (run 10) for the same five items — about 40% more
+deliberation for identical output.
+
+This model reads everything it is given and thinks about all of it. Each block
+added to a prompt has a running cost paid every session, and that cost is
+invisible until you measure two runs against each other.
+
+Open question: the unattended block may belong only in the act prompt, where the
+impossible-requirement case actually arises. The planning round has nothing to
+substitute.
+
+## 4. The act prompt is cheap; acts are expensive for other reasons
+
+Run 10's scaffold act: 1,333 thinking characters, four and a half minutes, seven
+tool calls, verified first time. The act prompt is not the problem.
+
+Run 10's persistence act took nineteen minutes. The breakdown matters more than
+the total:
+
+| span | what |
+|---|---|
+| ~1.5 min | four `bash` calls hunting the host filesystem for an `org.json` jar |
+| ~5.5 min | one unbroken think, no tool calls |
+| ~6 min | writing three files |
+| ~6 min | five `android_test` runs, editing between each |
+
+Three files is inside the five-file atomicity budget, and the act finished and
+verified. **This was not an atomicity failure.**
+
+## 5. The planner sets traps for the worker
+
+The persistence item's `detail` said to use `org.json` "built into Android; do
+NOT add kotlinx". True on a device. But `org.json` is stubbed on the JVM, so
+unit tests need an explicit `testImplementation` — and the version the worker
+first reached for did not resolve from Maven Central.
+
+So the worker spent a third of its session discovering and fixing a constraint
+the planner invented, in a `detail` written by a session that could not test it.
+
+This is the structural cost of `detail` being the only context an item ever gets.
+A plan is asserting facts it has not verified, one round before anyone can check.
+
+**Mitigation, and two thirds of this was anticipatable:**
+
+- The JVM/`org.json` stub is a well-known Android gotcha, not a discovery.
+- The unresolvable version is precisely what `src/versions.ts` in pi-android
+  exists to prevent. It pins Gradle, AGP, Kotlin and Compose so the model never
+  guesses. `org.json` simply was not on the list — a one-line fix, plus a
+  mention in `android_status` so the *planner* sees it before writing the item.
+- The filesystem hunt needs one sentence in `android_status`: dependencies
+  resolve from Maven Central inside the container; do not look for jars on disk.
+- Only the third layer — that `org.json` drops a trailing `.0` on serialisation
+  and accepts `NaN` — is genuine discovery, and NOTES.md is its right home.
+
+The generalisable version, since you cannot enumerate every library in advance:
+make `android_build` and `android_test` recognise an unresolvable dependency in
+the Gradle output and say so plainly, rather than making the model infer it from
+a wall of log.
+
+## 6. The memory file works
+
+Unprompted, the worker appended this to NOTES.md:
+
+> JVM tests need `testImplementation("org.json:json")`; 20250101 was NOT
+> resolvable from mavenCentral in this container — **use 20240303**.
+
+That is the trap from finding 5, written down with the working version, for a
+session that has not been born yet. The notes file after three tasks reads like
+something a person would write. This part of the design needs no change.
+
+## 7. A tool the model does not have to assemble is worth a lot
+
+pi-android gives the worker a build front door, a fixed version matrix, and
+shaped output — an injected failure goes from 2,837 bytes of Gradle log to 191.
+
+Run 6, without it, spent roughly a third of a session hunting for a Gradle
+wrapper. Run 10's scaffold act called `android_status`, `android_scaffold`,
+`android_build` and was done in four and a half minutes.
+
+Output shaping is most of the value. The small model's window cannot afford raw
+Gradle logs, and a truncated log is worse than no log.
+
+---
+
+## Where run 10 stands
+
+Reset to the `16b8e14` baseline, no wall-clock cap. Planned five items, then:
+
+- `eq.scaffold-compose-project-and-get-a` — verified
+- `eq.profile-model-json-store-in-filesdir` — verified
+- `eq.research-how-band-sliders-can-actually` — running
+
+This is the first run where a task closed and the loop advanced to the next one
+on its own.
+
+## Still open
+
+- **The project description contradicts Android.** It says the app adjusts
+  system audio and that moving a slider changes the sound. An unprivileged app
+  cannot equalize other apps' audio. Run 7 worked this out privately and lost
+  it; runs 8 and 10 both queued research for it. The standing guidance in `eq`'s
+  detail still asserts the impossible thing.
+- **Acts have no look budget.** Deliberately exempt. The 30-minute worker
+  timeout is the only backstop.
+- **`timedOutRound()` has never fired in a live run.** Tested, never exercised.
+- **Run 10 tests two prompt changes at once** — `dda1275` and `17c047f`. If the
+  numbers move we will not know which one moved them.
+- The worker prompt still describes the `todo add <id> ...` CLI form while the
+  extension registers `todo_add`.
+- `todo doctor` warns about `detail` on non-leaf tasks, but a plan's detail *is*
+  read, via the plan prompt. The warning is probably wrong for plans.
+- The eval harness in `eval/` has never been run. Run it or delete it.
