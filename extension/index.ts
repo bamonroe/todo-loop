@@ -537,7 +537,7 @@ export default function (pi: ExtensionAPI) {
 		name: "todo_read",
 		label: "Read Todo",
 		description:
-			"Look at the assigned task, or list its parent, children or siblings. Relations come back as titles and status only — read their code, not their queue entries. Use it to orient or to check for a duplicate before todo_add.",
+			"Look at the assigned task, or list its parent, children or siblings. Relations return titles and status only. Use it to orient, or to check for a duplicate before todo_add.",
 		promptSnippet: "Use todo_read to see the assigned task or list neighbouring tasks; never read todo.toml directly.",
 		parameters: Type.Object({
 			relation: Type.Optional(

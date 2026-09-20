@@ -246,14 +246,16 @@ export function renderTaskPrompt(store: Store, task: Task, options: PromptOption
 		// details into a window that could not afford them. Fifty tokens here
 		// answers the question it was actually asking — is this mine or the next
 		// task's — and removes the motive.
+		//
+		// Telling it not to read the file lives on todo_read's promptSnippet, not
+		// here. The snippet is attached to the affordance and costs one line; this
+		// block is rendered per task and would repeat the same sentence forever.
 		parts.push(
 			[
 				"## The tasks around this one",
 				"Titles only, for boundaries. Work that belongs to another task is not yours to do, and not yours to fix.",
 				"",
 				...neighbours,
-				"",
-				"Do not open `todo.toml`. Use `todo_read` if you need this list again; it is the cheap version of the same thing.",
 			].join("\n"),
 		);
 	}

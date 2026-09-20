@@ -208,6 +208,5 @@ test("sibling titles are handed over, sibling details are not", () => {
 		/never reach the worker's window/,
 		"handing over a sibling's detail costs more than the file read this replaces",
 	);
-	assert.match(prompt, /Do not open `todo\.toml`/);
 	assert.match(prompt, /Write BandProfile\.adapt/, "the worker's own detail still comes through in full");
 });
