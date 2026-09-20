@@ -165,6 +165,16 @@ export interface Config {
 		 * "research" a deliverable rather than a session that ends.
 		 */
 		memory_file: string;
+		/**
+		 * Notes-maintenance tripwire: the fraction of the worker window the
+		 * memory file may cost before the driver queues a compaction docs act.
+		 * The currency is window share because the file is read by every
+		 * session; a fixed byte threshold would eventually mean "delete true
+		 * facts until the number is satisfied". 0 disables.
+		 */
+		memory_share: number;
+		/** The worker's context window, for pricing the memory file. */
+		memory_window_tokens: number;
 	};
 	atomic: {
 		/**
@@ -274,6 +284,8 @@ export const DEFAULT_CONFIG: Config = {
 		look_budget: 6,
 		max_depth: 8,
 		memory_file: "NOTES.md",
+		memory_share: 0.15,
+		memory_window_tokens: 56_320,
 	},
 	atomic: {
 		max_files: 5,
@@ -399,6 +411,8 @@ export function parseConfig(text: string): Config {
 			look_budget: Math.max(0, pickNumber(plan, "look_budget", DEFAULT_CONFIG.plan.look_budget)),
 			max_depth: Math.max(1, pickNumber(plan, "max_depth", DEFAULT_CONFIG.plan.max_depth)),
 			memory_file: pickString(plan, "memory_file", DEFAULT_CONFIG.plan.memory_file),
+			memory_share: Math.max(0, pickNumber(plan, "memory_share", DEFAULT_CONFIG.plan.memory_share)),
+			memory_window_tokens: Math.max(0, pickNumber(plan, "memory_window_tokens", DEFAULT_CONFIG.plan.memory_window_tokens)),
 		},
 		atomic: {
 			max_files: Math.max(1, pickNumber(atomic, "max_files", DEFAULT_CONFIG.atomic.max_files)),

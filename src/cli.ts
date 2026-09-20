@@ -21,6 +21,7 @@ import {
 import { diagnose, formatChecks } from "./doctor.ts";
 import { commitAll, gatherEvidence, headCommit, isGitRepo, isTreeClean, loopOwnedPaths, revertTo, runCommand } from "./evidence.ts";
 import { renderAssignmentPrompt } from "./prompt.ts";
+import { maintainNotes } from "./notes.ts";
 import { checkPlanRound, type PlanVerdict } from "./plan.ts";
 import {
 	allowedChildLevels,
@@ -681,6 +682,22 @@ async function runLoop(
 		if (!env.store.loop.running) {
 			console.log("loop stopped");
 			return EXIT_OK;
+		}
+
+		// The notes tripwire: at most one maintenance act, queued before picking
+		// so it competes for the next slot like any other work.
+		if (!dryRun) {
+			const queued = maintainNotes(
+				env.store,
+				env.cwd,
+				env.config.plan.memory_file,
+				env.config.plan.memory_share,
+				env.config.plan.memory_window_tokens,
+			);
+			if (queued) {
+				console.log(`[todo-loop] notes maintenance queued: ${queued.id} — ${queued.title}`);
+				persist();
+			}
 		}
 
 		const task = nextReady(env.store);
