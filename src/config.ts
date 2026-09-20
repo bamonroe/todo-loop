@@ -100,6 +100,17 @@ export interface Config {
 		 */
 		research_budget: number;
 		/**
+		 * How many times a planning round may look at the repository before the
+		 * harness tells it to stop looking and write down what it still needs.
+		 *
+		 * Run 4 spent its entire ten-minute round on thirteen exploratory calls
+		 * and added nothing: "look first" had no bound, so step zero never ended.
+		 * A planner that cannot settle a question in this many calls is holding a
+		 * research act, not a question it is about to answer. Counts inspection
+		 * only — the todo tools are free, since writing items is the point.
+		 */
+		look_budget: number;
+		/**
 		 * Backstop only. Nesting is meant to terminate because planners run out of
 		 * next steps, not because they hit a wall — but a plan that only ever
 		 * spawns plans would otherwise recurse forever, so at this depth a plan may
@@ -216,6 +227,7 @@ export const DEFAULT_CONFIG: Config = {
 	plan: {
 		max_children: 5,
 		research_budget: 2,
+		look_budget: 6,
 		max_depth: 8,
 		memory_file: "NOTES.md",
 	},
@@ -327,6 +339,7 @@ export function parseConfig(text: string): Config {
 		plan: {
 			max_children: Math.max(1, pickNumber(plan, "max_children", DEFAULT_CONFIG.plan.max_children)),
 			research_budget: Math.max(0, pickNumber(plan, "research_budget", DEFAULT_CONFIG.plan.research_budget)),
+			look_budget: Math.max(0, pickNumber(plan, "look_budget", DEFAULT_CONFIG.plan.look_budget)),
 			max_depth: Math.max(1, pickNumber(plan, "max_depth", DEFAULT_CONFIG.plan.max_depth)),
 			memory_file: pickString(plan, "memory_file", DEFAULT_CONFIG.plan.memory_file),
 		},

@@ -117,6 +117,11 @@ Two rules keep it honest, both enforced mechanically:
   allowance is *inherited* by child plans rather than reset, so a planner cannot
   refill it by spawning a sub-planner to keep reading.
 
+- **Looking is budgeted.** After `plan.look_budget` inspection calls (default 6)
+  a planning round's tool results start telling it to stop looking: anything it
+  still does not know is a research act, to be written down rather than dug at.
+  The todo tools are free, and acts are not metered.
+
 `plan.max_children` (default 5) caps a round, and `plan.max_depth` (default 8) is
 a backstop against a branch that only ever plans.
 

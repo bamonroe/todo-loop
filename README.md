@@ -369,6 +369,17 @@ machine. `todo_complete` on a plan checks:
 That last one is the same hard failure as an act's empty diff, inverted. "A plan
 produces queue entries, not code" is enforced, not requested.
 
+**Looking is budgeted too, in the session rather than at the gate.** A round is
+told to look at the repository before deciding, and that instruction on its own
+has no stopping condition in it — the first run under this design spent its
+entire window on thirteen exploratory calls and added nothing. After
+`plan.look_budget` inspection calls (default 6) every further tool result comes
+back carrying the exit: *anything you still do not know is a research act; write
+it down and move on*. The todo tools are never counted, and acts are not metered
+at all — an act is supposed to read the repository. The point is not to forbid
+the next call but to give the unanswered question somewhere to go, where it
+becomes budgeted, verifiable and readable by every round after it.
+
 An empty round is legal *only* once the branch has delivered something; on the
 first round it would close a project having built nothing.
 
@@ -455,10 +466,11 @@ matter most:
   task that did not do it, and the diff the verifier judges is wrong by the same
   amount. Refusing to start costs one `git stash`.
 - `loop.on_silent_stop` — `halt` (default) or `retry`.
-- `plan.max_children` / `plan.research_budget` / `plan.max_depth` /
-  `plan.memory_file` — the size of a round, how many rounds a branch may close
-  with research alone, the nesting backstop, and where research acts write what
-  they find. See
+- `plan.max_children` / `plan.research_budget` / `plan.look_budget` /
+  `plan.max_depth` / `plan.memory_file` — the size of a round, how many rounds a
+  branch may close with research alone, how many inspection calls a round may
+  spend before the harness tells it to stop looking (default 6; `0` disables),
+  the nesting backstop, and where research acts write what they find. See
   [How a planning round closes](#how-a-planning-round-closes).
 - `loop.plan_timeout_ms` — wall-clock cap on a planning round specifically
   (`decompose_timeout_ms` is still read).

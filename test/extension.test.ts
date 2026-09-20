@@ -342,6 +342,21 @@ test("bulky tool output is capped and spilled to a file", async () => {
 	assert.equal(fs.readFileSync(spill, "utf8"), text);
 });
 
+test("a capped file read keeps the head, a capped command keeps the tail", async () => {
+	await run("todo-run");
+	const doc = `TOP OF FILE\n${"filler line\n".repeat(500)}END OF FILE`;
+
+	const read = (await h.emit("tool_result", { toolName: "read", content: [{ type: "text", text: doc }] })) as {
+		content: { text: string }[];
+	};
+	assert.match(read.content[0].text, /TOP OF FILE/);
+
+	const bash = (await h.emit("tool_result", { toolName: "bash", content: [{ type: "text", text: doc }] })) as {
+		content: { text: string }[];
+	};
+	assert.match(bash.content[0].text, /END OF FILE/);
+});
+
 test("small tool output passes through untouched", async () => {
 	await run("todo-run");
 	const result = await h.emit("tool_result", { toolName: "bash", content: [{ type: "text", text: "ok" }] });
@@ -565,6 +580,41 @@ test("a planning round carries this round's items across compaction", async () =
 	assert.match(result.compaction.summary, /added_this_round: auth\.rotate-the-signing-secrets/);
 	assert.match(result.compaction.summary, /Do not re-add items/);
 	assert.match(result.compaction.summary, /Write no code/);
+});
+
+test("a planning round's looking is budgeted, and the budget names the exit", async () => {
+	withEpic();
+	await run("todo-run");
+	const look = async () =>
+		((await h.emit("tool_result", { toolName: "bash", content: [{ type: "text", text: "ok" }] })) as
+			| { content: { text: string }[] }
+			| undefined)?.content[0].text ?? "";
+
+	// Default budget is 6; the first five looks pass through untouched.
+	for (let i = 0; i < 5; i++) assert.equal(await look(), "", `look ${i + 1} should be free`);
+
+	const spent = await look();
+	assert.match(spent, /Looking budget spent/);
+	assert.match(spent, /research act/);
+	// The cut-off has to survive the model ignoring it once.
+	assert.match(await look(), /Looking budget spent/);
+});
+
+test("writing items down is never charged against the looking budget", async () => {
+	withEpic();
+	await run("todo-run");
+	for (let i = 0; i < 8; i++) {
+		const out = await h.emit("tool_result", { toolName: "todo_add", content: [{ type: "text", text: "Added" }] });
+		assert.equal(out, undefined, "todo tools must stay free");
+	}
+});
+
+test("an act may read the repository without being metered", async () => {
+	await run("todo-run");
+	for (let i = 0; i < 8; i++) {
+		const out = await h.emit("tool_result", { toolName: "bash", content: [{ type: "text", text: "ok" }] });
+		assert.equal(out, undefined, "acts are supposed to read the repo");
+	}
 });
 
 test("under the shell driver the session defers completion instead of doing it twice", async () => {

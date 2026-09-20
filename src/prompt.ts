@@ -44,6 +44,7 @@ export interface PromptOptions {
 	maxChildren?: number;
 	/** Rounds this branch may still close with research alone. */
 	researchBudget?: number;
+	lookBudget?: number;
 	/** Nesting backstop; at the cap a round may add acts only. */
 	maxDepth?: number;
 	/** Where research acts write what they find, so the next session can read it. */
@@ -169,6 +170,7 @@ export function renderPlanPrompt(store: Store, task: Task, options: PromptOption
 	const maxChildren = options.maxChildren ?? 5;
 	const maxFiles = options.maxFiles ?? 5;
 	const budget = options.researchBudget ?? 2;
+	const lookBudget = options.lookBudget ?? 6;
 	const depth = depthOf(task, store.tasks);
 	const atDepthCap = depth + 1 >= (options.maxDepth ?? 8);
 	const hasDone = recentlyCompleted(store, task.id, 1).length > 0;
@@ -188,7 +190,8 @@ export function renderPlanPrompt(store: Store, task: Task, options: PromptOption
 			"",
 			"Fewer than that is fine — and better than padding. You will be asked again after these are done, with the results in front of you, so anything you cannot decide well right now is not lost. It is simply not this round's question.",
 			"",
-			"1. **Look first.** Read what is actually on disk — the files, the tooling, what the last steps left behind. A round decided without looking invents work that does not need doing and misses work that does.",
+			`1. **Look, briefly.** Read what is on disk — the files, the tooling, what the last steps left behind${options.memoryFile ? `, and \`${options.memoryFile}\` for what earlier rounds already found out` : ""}. A round decided without looking invents work that does not need doing and misses work that does.`,
+			`   You have about ${lookBudget} commands for this, and the harness will say so when they are gone. **Anything you cannot settle in them is not a question to keep digging at — it is a research act.** Write it down in one line and move on. Finding out is work; it belongs in the queue like any other work, where it gets its own session and is read by every round after it. A round that spends itself looking and writes nothing has produced nothing.`,
 			"2. **Then write them down, one at a time.** Add each item the moment you decide it. Do not work them all out first: planning the whole batch before writing anything means holding every item in your head at once and re-deciding earlier ones as later ones change, and if this session ends early everything you worked out is lost while a written item is already safe.",
 			"",
 			"Keep the deliberation per item short. If deciding one takes long, that is the signal it should be a plan, not that it needs more thought here.",

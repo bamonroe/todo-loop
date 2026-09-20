@@ -29,6 +29,7 @@ import {
 	isGitRepo,
 	isTreeClean,
 	loopOwnedPaths,
+	truncateHead,
 	truncateTail,
 } from "../src/evidence.ts";
 import { renderAssignmentPrompt, renderPinnedTask } from "../src/prompt.ts";
@@ -74,6 +75,18 @@ import { verify, type Completer, type Verdict } from "../src/verify.ts";
 
 /** Tools whose output is bulky enough to be worth capping before it enters context. */
 const BULKY_TOOLS = new Set(["bash", "grep", "rg", "glob", "list", "read", "web_fetch"]);
+
+/**
+ * Which end to keep when a result is too big.
+ *
+ * Command output earns its verdict at the end — the exit line, the stack
+ * trace, the last failing assertion — so `bash` keeps its tail. Everything
+ * else here is a document read from the top: a file, a directory listing, a
+ * match list. Keeping *their* tail hands the model the last 2KB of a file and
+ * none of its beginning, which is how a run-4 planner read NOTES.md three
+ * times and still never saw the top of it.
+ */
+const TAIL_TRUNCATED_TOOLS = new Set(["bash"]);
 
 interface TextBlock {
 	type: string;
@@ -144,6 +157,8 @@ export default function (pi: ExtensionAPI) {
 	/** Usage from the most recent nested verifier call, reported back on the tool result. */
 	let lastVerifierUsage: Usage | undefined;
 	let spillDir: string | undefined;
+	/** Inspection calls this planning round has spent, and whose round they belong to. */
+	let looks = { taskId: "", count: 0 };
 
 	const init = (ctx: ExtensionContext): void => {
 		if (initialised) return;
@@ -297,6 +312,7 @@ export default function (pi: ExtensionAPI) {
 			maxFiles: config.atomic.max_files,
 			maxChildren: config.plan.max_children,
 			researchBudget: researchBudgetOf(task, config.plan.research_budget),
+			lookBudget: config.plan.look_budget,
 			maxDepth: config.plan.max_depth,
 			memoryFile: config.plan.memory_file,
 			buildCommand: config.verify.build_command,
@@ -866,34 +882,62 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	/**
+	 * Count a planning round's looking, and cut it off when the budget is gone.
+	 *
+	 * Run 4's planner spent a whole ten-minute round on thirteen exploratory
+	 * calls and wrote nothing: "look first" is good advice with no stopping
+	 * condition in it. The budget supplies one, and — this is the part that
+	 * matters — it does not simply forbid the next call, it names the exit.
+	 * A question that outlasts the budget is a research act; saying so converts
+	 * unbounded in-session exploration into a queued item that is budgeted,
+	 * verifiable and survives the session ending.
+	 *
+	 * Only plans are metered. An act is *supposed* to read the repository, and
+	 * the todo tools are never counted in either case, since writing items down
+	 * is the behaviour being bought.
+	 */
+	const spendLook = (store: Store, toolName: string): string | undefined => {
+		const budget = config.plan.look_budget;
+		if (budget <= 0) return;
+		const task = activeTask(store);
+		if (!task || assignmentFor(task) !== "plan") return;
+		if (toolName.startsWith("todo_")) return;
+
+		if (looks.taskId !== task.id) looks = { taskId: task.id, count: 0 };
+		looks.count += 1;
+		if (looks.count < budget) return;
+		return `[Looking budget spent — ${looks.count} of ${budget} inspection calls this round. Stop looking. Anything you still do not know is a research act: add it with todo_add, in one line, and move on to writing this round's items.]`;
+	};
+
+	/**
 	 * Pi's built-in cap is 50KB / 2000 lines — far too generous for a 27B.
 	 * The full text goes to a temp file so nothing is actually lost.
 	 */
 	pi.on("tool_result", async (event, ctx) => {
 		init(ctx);
-		if (!read().loop.running) return;
-		if (!BULKY_TOOLS.has(event.toolName)) return;
+		const store = read();
+		if (!store.loop.running) return;
 
+		const nudge = spendLook(store, event.toolName);
 		const text = textOf(event.content);
 		const max = config.context.tool_output_max_bytes;
-		if (!text || Buffer.byteLength(text, "utf8") <= max) return;
+		const oversize = BULKY_TOOLS.has(event.toolName) && !!text && Buffer.byteLength(text, "utf8") > max;
+		if (!nudge && !oversize) return;
 
-		spillDir = spillDir ?? mkdtempSync(join(tmpdir(), "todo-loop-"));
-		const file = join(spillDir, `${event.toolName}-${Date.now()}.txt`);
-		try {
-			writeFileSync(file, text);
-		} catch {
-			return;
+		let body = text ?? "";
+		if (oversize) {
+			const clip = TAIL_TRUNCATED_TOOLS.has(event.toolName) ? truncateTail : truncateHead;
+			spillDir = spillDir ?? mkdtempSync(join(tmpdir(), "todo-loop-"));
+			const file = join(spillDir, `${event.toolName}-${Date.now()}.txt`);
+			try {
+				writeFileSync(file, text as string);
+				body = `${clip(text as string, max)}\n\n[output capped at ${max} bytes; full text at ${file}]`;
+			} catch {
+				if (!nudge) return;
+			}
 		}
 
-		return {
-			content: [
-				{
-					type: "text",
-					text: `${truncateTail(text, max)}\n\n[output capped at ${max} bytes; full text at ${file}]`,
-				},
-			],
-		};
+		return { content: [{ type: "text", text: nudge ? `${body}\n\n${nudge}` : body }] };
 	});
 
 	/**
