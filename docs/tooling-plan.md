@@ -1,16 +1,25 @@
 # Android tooling: decisions
 
 > **Implementation status (2026-09-20, evening).** Everything below is built,
-> tested and committed except the emulator verbs: todo-loop's closing gate,
-> `[project]` section and notes tripwire on branch `collapse-prompt-modes`;
-> pi-android's `KNOWN_DEPS`, unresolvable-dependency detection, `android_lint`
-> and `android_api` on branch `tooling-plan`. The emulator verbs stay design-
-> only for a stated reason: the builder image has no emulator binary and no
-> system images (verified — `NO_EMULATOR`, `NO_SYSTEM_IMAGES`; the host has
-> adb and /dev/kvm), so building the verbs means first growing the image with
-> sdkmanager downloads, which is its own piece of work and unverifiable until
-> then. `[project].setup_command` — built — is where the boot goes when it
-> lands.
+> tested and committed — the emulator verbs included: todo-loop's closing
+> gate, `[project]` section and notes tripwire on branch
+> `collapse-prompt-modes`; pi-android's `KNOWN_DEPS`,
+> unresolvable-dependency detection, `android_lint`, `android_api`,
+> `android_install` and `android_instrumented` on branch `tooling-plan`.
+>
+> An earlier version of this note claimed the emulator did not exist,
+> from a probe of the *builder* image (`NO_EMULATOR`). Wrong place: the
+> emulator is `/data/android`'s compose service (`sfit-android-emulator:local`,
+> headless, KVM, SDK and AVDs on the storage array). Booting belongs to
+> `[project].setup_command` (`cd /data/android && docker compose up -d
+> android`); the verbs find a device present or say plainly that none is.
+> Verified end to end: run 10's own APK installed by the verb, launched,
+> alive — and the first screenshot of the loop's work showed a layout defect
+> (a Profile field swallowing the screen, the sliders invisible) that
+> compile-and-unit-test verification could never have caught. One boot
+> caveat, observed: the entrypoint passes `-wipe-data`, so every boot is
+> cold and app state does not survive restarts — fine for verification,
+> worth knowing for anything else.
 
 Decisions taken 2026-09-20 while run 10 was in flight. Each is justified by
 counted waste in a real worker transcript, not by guessing at what might help.
