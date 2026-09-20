@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+	discardChildren,
 	childrenOf,
 	counts,
 	isLeaf,
@@ -155,4 +156,70 @@ test("retrying the same task keeps the rejection reason", () => {
 	recordFailure(store, store.tasks[1], "the route is never registered");
 	markDoing(store, store.tasks[1], "abc123");
 	assert.equal(store.loop.last_failure, "the route is never registered");
+});
+
+/**
+ * A breakdown cut off partway had written 2 of ~8 children. The tree reverted
+ * cleanly but the queue kept them, and the loop started building against the
+ * fragment — every task in it individually verifiable, six of them simply
+ * absent.
+ */
+test("discardChildren removes a truncated breakdown's whole subtree", () => {
+	const store = parseStore(`
+[[task]]
+id = "eq"
+title = "An equalizer app"
+level = "epic"
+status = "doing"
+attempts = 0
+
+[[task]]
+id = "eq.scaffold"
+title = "Scaffold gradle"
+parent = "eq"
+status = "todo"
+attempts = 0
+
+[[task]]
+id = "eq.engine"
+title = "Engine interface"
+parent = "eq"
+level = "scope"
+status = "todo"
+attempts = 0
+
+[[task]]
+id = "eq.engine.iface"
+title = "Write the interface"
+parent = "eq.engine"
+status = "todo"
+attempts = 0
+
+[[task]]
+id = "other"
+title = "Unrelated work"
+status = "todo"
+attempts = 0
+`);
+
+	const dropped = discardChildren(store, "eq");
+
+	assert.deepEqual(dropped.sort(), ["eq.engine", "eq.engine.iface", "eq.scaffold"]);
+	assert.deepEqual(
+		store.tasks.map((task) => task.id),
+		["eq", "other"],
+		"the epic itself and unrelated work survive; a grandchild does not outlive its parent's rejection",
+	);
+});
+
+test("discardChildren on a leaf changes nothing", () => {
+	const store = parseStore(`
+[[task]]
+id = "solo"
+title = "A leaf"
+status = "todo"
+attempts = 0
+`);
+	assert.deepEqual(discardChildren(store, "solo"), []);
+	assert.equal(store.tasks.length, 1);
 });

@@ -698,6 +698,30 @@ export function descendantsOf(id: string, tasks: Task[]): Task[] {
 }
 
 /**
+ * Throw away everything a breakdown attempt added, so a plan that was cut off
+ * partway cannot be worked as though it were complete.
+ *
+ * This is the failure the loop had no defence against. A breakdown killed at the
+ * 30-minute mark had written 2 of roughly 8 children; the working tree reverted
+ * cleanly, but `todo add` writes land in the queue, and the queue is persisted
+ * from memory *after* the revert so the failure record survives — which meant
+ * the children survived too. The loop then took the first of them and started
+ * building. Every task in a truncated plan passes verification on its own
+ * merits; nothing anywhere notices that six are missing. It does not halt, it
+ * quietly builds the wrong thing, which is worse than stopping.
+ *
+ * Returns the ids removed. Descendants go too: a child that was itself broken
+ * down before the cut cannot outlive its parent's rejection.
+ */
+export function discardChildren(store: Store, parentId: string): string[] {
+	const doomed = descendantsOf(parentId, store.tasks);
+	if (!doomed.length) return [];
+	const ids = new Set(doomed.map((task) => task.id));
+	store.tasks = store.tasks.filter((task) => !ids.has(task.id));
+	return [...ids];
+}
+
+/**
  * Insert children directly after their parent's block rather than at the end of
  * the queue.
  *

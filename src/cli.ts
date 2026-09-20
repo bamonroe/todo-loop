@@ -27,6 +27,7 @@ import {
 	assignmentFor,
 	blockedLeaves,
 	counts,
+	discardChildren,
 	createTask,
 	DEFAULT_STORE_FILE,
 	effectiveLevel,
@@ -532,7 +533,7 @@ export function workerArgs(config: Config, prompt: string): { args: string[]; mo
 	};
 }
 
-function runPi(env: Env, prompt: string, dryRun: boolean): Promise<PiRun> {
+function runPi(env: Env, prompt: string, dryRun: boolean, budgetMs = 0): Promise<PiRun> {
 	const { args, model } = workerArgs(env.config, prompt);
 	if (dryRun) {
 		console.log(`--- would run pi (${model}) with prompt ---\n${prompt}\n--- end prompt ---`);
@@ -547,7 +548,7 @@ function runPi(env: Env, prompt: string, dryRun: boolean): Promise<PiRun> {
 		// `loop.running` flag, so without this the session drives the loop too:
 		// every task verified and committed twice, then a failed attempt to
 		// replace a print mode session.
-		const budget = env.config.loop.worker_timeout_ms;
+		const budget = budgetMs;
 		const child = spawn("pi", args, {
 			cwd: env.cwd,
 			stdio: ["ignore", "pipe", "inherit"],
@@ -568,7 +569,7 @@ function runPi(env: Env, prompt: string, dryRun: boolean): Promise<PiRun> {
 		const timer = budget
 			? setTimeout(() => {
 					timedOut = true;
-					console.error(`worker exceeded loop.worker_timeout_ms (${budget}ms); stopping it`);
+					console.error(`worker exceeded its ${budget}ms budget; stopping it`);
 					child.kill("SIGTERM");
 					setTimeout(() => child.kill("SIGKILL"), 10_000).unref();
 				}, budget)
@@ -641,7 +642,9 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 
 		const kind = assignmentFor(task) === "decompose" ? `break down ${levelOf(task)}` : "implement";
 		console.log(`\n=== [${iteration}/${maxIterations}] ${kind} — ${task.id}: ${task.title} ===`);
-		const result = await runPi(env, prompt, dryRun);
+		const decomposing = assignmentFor(task) === "decompose";
+		const budgetMs = decomposing ? env.config.loop.decompose_timeout_ms : env.config.loop.worker_timeout_ms;
+		const result = await runPi(env, prompt, dryRun, budgetMs);
 		if (result.code !== 0) console.error(`pi exited ${result.code}; verifying anyway`);
 
 		refresh();
@@ -662,7 +665,7 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 		// half-finished work to the verifier wastes a verification to be told what
 		// we already know, and a lucky pass would commit it.
 		const verdict = result.timedOut
-			? { pass: false, reason: `Worker exceeded loop.worker_timeout_ms (${env.config.loop.worker_timeout_ms}ms).` }
+			? { pass: false, reason: `Worker exceeded its ${budgetMs}ms budget.` }
 			: dryRun
 				? { pass: true, reason: "dry run" }
 				: await verifyTask(env, current);
@@ -677,6 +680,16 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 
 		const attempts = recordFailure(env.store, current, verdict.reason);
 		console.error(`✗ ${current.id} rejected (attempt ${attempts}/${env.config.verify.max_attempts}): ${verdict.reason}`);
+
+		// A breakdown that was cut off left part of a plan in the queue. Those
+		// children are not salvage — each one looks fine alone, and nothing
+		// downstream can tell that the rest are missing. Only on a timeout: a
+		// breakdown the verifier rejected on its merits finished, and its retry
+		// prompt says accepted children stay.
+		if (result.timedOut && decomposing) {
+			const dropped = discardChildren(env.store, current.id);
+			if (dropped.length) console.error(`  discarded ${dropped.length} child item(s) from the truncated breakdown`);
+		}
 
 		// Undo the rejected attempt. This runs before any persist() below so the
 		// hard reset cannot roll back the failure it is reacting to: the store is

@@ -82,7 +82,7 @@ function atomicityRules(maxFiles: number): string {
 		`Every task you create must be finishable by one worker, in one session, with no memory of this one. That is a hard constraint — the worker will see only the task text you write, not this conversation.`,
 		"",
 		"Apply these tests to each task before you add it:",
-		`- **Name the files.** If you cannot say which files it touches, it is not a task — make it a scope instead.`,
+		`- **Name the files, from what is on disk now.** If naming them means first deciding a design, it is not a task — make it a scope.`,
 		`- **Count them.** More than ${maxFiles} files means it is too big. Split it.`,
 		"- **One sentence of intent.** If describing the change needs \"and\", it is two tasks.",
 		"- **Self-contained.** The worker cannot ask questions. Anything it needs — a file path, a function name, a format, a constraint — goes in the task detail or it does not exist.",
@@ -118,8 +118,11 @@ export function renderDecomposePrompt(store: Store, task: Task, options: PromptO
 			"",
 			"1. **Investigate first.** Read the code this touches — the files, the existing patterns, what is already there. A breakdown written without looking at the repository invents work that does not need doing and misses work that does.",
 			level === "epic"
-				? `2. **Then enumerate.** Add at least ${minChildren} child items covering everything this epic needs.`
-				: `2. **Then enumerate.** Add a child task for each piece of work this scope turns out to need. If it turns out to be a single atomic task, add exactly that one task — that is a real answer, not a failure.`,
+				? `2. **Then enumerate, one at a time.** Add at least ${minChildren} child items covering everything this epic needs.`
+				: `2. **Then enumerate, one at a time.** Add a child item for each piece of work this scope turns out to need. If it turns out to be a single atomic task, add exactly that one task — that is a real answer, not a failure.`,
+			"",
+			"**Add each child the moment you decide it. Do not plan them all first.** Decide one, write it, then think about the next. Planning the whole structure before writing anything means holding every child in your head at once, re-deciding earlier ones as later ones change — and if this session ends early, everything you worked out is lost while a written child is already safe.",
+			"Keep the deliberation per child short. If deciding one takes long, that is the signal it should be a scope, not that it needs more thought here.",
 			"",
 			`Write no code. Change no files. The breakdown is rejected automatically if the working tree changes — ${article(level)} produces queue entries, nothing else.`,
 		].join("\n"),
@@ -129,7 +132,7 @@ export function renderDecomposePrompt(store: Store, task: Task, options: PromptO
 		[
 			"## What the children may be",
 			allowed.includes("scope")
-				? `- \`task\` — atomic, implementable exactly as written (see below).\n- \`scope\` — still needs investigation before it can be split into tasks. Use this where the work is real but the shape is not yet clear.`
+				? `- \`task\` — you can name the files it touches **right now**, from what is on disk today.\n- \`scope\` — anything else. It gets its own session later, which breaks it down with the earlier work already written and readable.\n\nPrefer \`scope\` whenever naming the files would mean deciding a design first. Deferring is not an admission that you could not work it out — a design decided now, against a repository that does not contain the earlier tasks' code yet, is a guess. The same decision made later is made by someone who can read that code. A guess written into a task detail is the only context its worker will ever have, so a wrong one is expensive and silent.`
 				: `- \`task\` — atomic, implementable exactly as written (see below). A scope may only spawn tasks, so everything you add here must clear the bar below.`,
 			"",
 			"Order matters: add them in the order they should be worked. Later tasks may depend on earlier ones, never the reverse.",

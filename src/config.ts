@@ -58,6 +58,17 @@ export interface Config {
 		 */
 		worker_timeout_ms: number;
 		/**
+		 * Wall-clock cap on a breakdown session specifically, 0 for none.
+		 *
+		 * Separate from worker_timeout_ms because the two fail differently. An
+		 * implementation task that overruns is usually lost, and killing it is
+		 * cheap — the tree reverts and nothing is left behind. A breakdown that
+		 * overruns has written part of a plan into the queue, and a partial plan
+		 * is worse than no plan: every task in it passes verification while the
+		 * missing ones are never noticed.
+		 */
+		decompose_timeout_ms: number;
+		/**
 		 * A ladder of strictness, each rung doing what the one below it does:
 		 * "off" ignores git, "commit" auto-commits each verified task, and
 		 * "require-clean" commits *and* refuses to start a task with a dirty tree.
@@ -171,6 +182,7 @@ export const DEFAULT_CONFIG: Config = {
 	loop: {
 		max_iterations: 50,
 		worker_timeout_ms: 0,
+		decompose_timeout_ms: 0,
 		checkpoint: "require-clean",
 		commit_prefix: "todo",
 		on_silent_stop: "halt",
@@ -241,6 +253,10 @@ export function parseConfig(text: string): Config {
 	const ollama = section(doc, "ollama");
 
 	const workerTimeout = Math.max(0, pickNumber(loop, "worker_timeout_ms", DEFAULT_CONFIG.loop.worker_timeout_ms));
+	const decomposeTimeout = Math.max(
+		0,
+		pickNumber(loop, "decompose_timeout_ms", DEFAULT_CONFIG.loop.decompose_timeout_ms),
+	);
 	const checkpointRaw = pickString(loop, "checkpoint", DEFAULT_CONFIG.loop.checkpoint);
 	const checkpoint =
 		checkpointRaw === "commit" || checkpointRaw === "require-clean" || checkpointRaw === "off"
@@ -272,6 +288,7 @@ export function parseConfig(text: string): Config {
 		loop: {
 			max_iterations: pickNumber(loop, "max_iterations", DEFAULT_CONFIG.loop.max_iterations),
 			worker_timeout_ms: workerTimeout,
+			decompose_timeout_ms: decomposeTimeout,
 			checkpoint,
 			commit_prefix: pickString(loop, "commit_prefix", DEFAULT_CONFIG.loop.commit_prefix),
 			on_silent_stop,

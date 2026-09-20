@@ -95,7 +95,11 @@ test("the breakdown prompt states the atomicity bar in checkable terms", () => {
 
 test("an epic may offer scope children; a scope may not", () => {
 	const asEpic = renderAssignmentPrompt(epic, epic.tasks[0], { mode: "tool" });
-	assert.match(asEpic, /`scope` — still needs investigation/);
+	assert.match(asEpic, /`scope` — anything else/);
+	// Scope is the default, not the fallback: the model produced zero scopes
+	// across two real runs while the wording framed deferring as a failure to
+	// work it out.
+	assert.match(asEpic, /Prefer `scope` whenever naming the files would mean deciding a design first/);
 
 	const scope = parseStore(`
 [[task]]
@@ -209,4 +213,13 @@ test("sibling titles are handed over, sibling details are not", () => {
 		"handing over a sibling's detail costs more than the file read this replaces",
 	);
 	assert.match(prompt, /Write BandProfile\.adapt/, "the worker's own detail still comes through in full");
+});
+
+test("children are written as they are decided, not planned in one block", () => {
+	// The run-2 breakdown spent 20,115 of its 21,878 output tokens on thinking,
+	// 82% of it in two blocks at the end, and had written two children when it
+	// was cut off. Everything worked out in those blocks died with the session.
+	const prompt = renderAssignmentPrompt(epic, epic.tasks[0], { mode: "tool" });
+	assert.match(prompt, /Add each child the moment you decide it\. Do not plan them all first\./);
+	assert.match(prompt, /Keep the deliberation per child short/);
 });

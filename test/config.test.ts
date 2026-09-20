@@ -55,3 +55,10 @@ test("worker_timeout_ms parses and defaults to no cap", () => {
 	// A negative budget would kill the worker on the first tick.
 	assert.equal(parseConfig("[loop]\nworker_timeout_ms = -5\n").loop.worker_timeout_ms, 0);
 });
+
+test("the breakdown gets its own budget, separate from a worker's", () => {
+	assert.equal(parseConfig("").loop.decompose_timeout_ms, 0);
+	const config = parseConfig("[loop]\nworker_timeout_ms = 900000\ndecompose_timeout_ms = 900000\n");
+	assert.equal(config.loop.decompose_timeout_ms, 900000);
+	assert.equal(config.loop.worker_timeout_ms, 900000);
+});
