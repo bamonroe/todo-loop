@@ -1,5 +1,17 @@
 # Android tooling: decisions
 
+> **Implementation status (2026-09-20, evening).** Everything below is built,
+> tested and committed except the emulator verbs: todo-loop's closing gate,
+> `[project]` section and notes tripwire on branch `collapse-prompt-modes`;
+> pi-android's `KNOWN_DEPS`, unresolvable-dependency detection, `android_lint`
+> and `android_api` on branch `tooling-plan`. The emulator verbs stay design-
+> only for a stated reason: the builder image has no emulator binary and no
+> system images (verified — `NO_EMULATOR`, `NO_SYSTEM_IMAGES`; the host has
+> adb and /dev/kvm), so building the verbs means first growing the image with
+> sdkmanager downloads, which is its own piece of work and unverifiable until
+> then. `[project].setup_command` — built — is where the boot goes when it
+> lands.
+
 Decisions taken 2026-09-20 while run 10 was in flight. Each is justified by
 counted waste in a real worker transcript, not by guessing at what might help.
 The package is `pi-android` at `~/pi/android` — four tools today
