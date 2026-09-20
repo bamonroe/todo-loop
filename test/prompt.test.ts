@@ -362,3 +362,16 @@ test("the unattended rule speaks the standalone driver's vocabulary", () => {
 	assert.match(prompt, /say so plainly in your summary/);
 	assert.doesNotMatch(prompt, /Where something turns out to be impossible as written[^]*?write it into/);
 });
+
+test("shared prose cannot drift between driver modes", () => {
+	// The refactor that introduced DRIVER_VOCABULARY exists because the two
+	// hand-maintained mode branches had already diverged: standalone was missing
+	// the "smaller than it looked" warning. Shared sentences must now appear in
+	// both modes or neither.
+	for (const mode of ["tool", "standalone"] as const) {
+		const prompt = renderAssignmentPrompt(plan, plan.tasks[0], { ...PLAN_OPTS, mode });
+		assert.match(prompt, /not the way to say "this is smaller than it looked"/);
+		assert.match(prompt, /But write it in one pass/);
+		assert.match(prompt, /An empty round is how a branch closes|an empty round will be rejected/);
+	}
+});

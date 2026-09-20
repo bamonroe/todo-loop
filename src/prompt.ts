@@ -161,6 +161,63 @@ function progressRule(budget: number, memoryFile?: string): string {
 }
 
 /**
+ * The only sentences that differ between the two drivers. Everything else in
+ * the prompts renders once, from one string, whichever mode is running.
+ *
+ * The two hand-maintained copies this table replaced had already drifted: the
+ * standalone branch was still missing the "smaller than it looked" warning the
+ * tool branch carried, and every prompt change had to be written twice —
+ * which is how the worker went on being taught `todo add` after the extension
+ * had long since registered `todo_add`.
+ */
+interface DriverVocabulary {
+	/** The refusal affordance, bare — for prose that names it. */
+	block: string;
+	/** The refusal instruction as a verb phrase: "call `todo_block`" / "say `BLOCKED:`". */
+	blockVerb: string;
+	/** Where an item's context goes: `detail` the field or `--detail` the flag. */
+	detailField: string;
+	/** The add affordance for a planning round. */
+	howToAdd(parentId: string): string;
+	/** How a planning round ends. */
+	finishPlan: string;
+	/** How an act ends. */
+	finishAct: string;
+	/** What to do when the task cannot be done as written. */
+	actBlocked: string;
+}
+
+const DRIVER_VOCABULARY: Record<"tool" | "standalone", DriverVocabulary> = {
+	tool: {
+		block: "`todo_block`",
+		blockVerb: "call `todo_block`",
+		detailField: "`detail`",
+		howToAdd: () =>
+			"Call `todo_add` once per item — `title`, `detail`, `level` (`act` or `plan`), and `kind` for an act. The parent is set for you.",
+		finishPlan: "When this round's items are written, call `todo_complete` with a one-line summary of what you decided and why.",
+		finishAct:
+			"When the task is genuinely done, call `todo_complete` with a one-line summary. That call is the only way to finish — stopping without it halts the loop.",
+		actBlocked: "If the task cannot be done as written, call `todo_block` with the reason instead of guessing.",
+	},
+	standalone: {
+		block: "`BLOCKED:`",
+		blockVerb: "say `BLOCKED:`",
+		detailField: "`--detail`",
+		howToAdd: (parentId) =>
+			[
+				"Run, once per item:",
+				"",
+				"```",
+				`todo add <id> "<title>" --parent ${parentId} --level <act|plan> --kind <code|docs|research> --detail "<everything the worker needs>"`,
+				"```",
+			].join("\n"),
+		finishPlan: "When this round's items are written, stop. Your final message must be a one-line summary of what you decided and why.",
+		finishAct: "When the task is genuinely done, stop. Your final message must be a one-line summary of what changed.",
+		actBlocked: "If the task cannot be done as written, say `BLOCKED:` followed by the reason.",
+	},
+};
+
+/**
  * Two facts the worker cannot observe from inside its own session: that nobody
  * is coming, and that an impossible requirement has a sanctioned answer other
  * than stopping.
@@ -175,7 +232,7 @@ function progressRule(budget: number, memoryFile?: string): string {
  */
 function unattendedRule(options: PromptOptions): string {
 	const record = options.memoryFile ? `write it into \`${options.memoryFile}\`` : "say so plainly in your summary";
-	const block = options.mode === "tool" ? "`todo_block`" : "`BLOCKED:`";
+	const block = DRIVER_VOCABULARY[options.mode].block;
 	return [
 		"## Nobody is watching this run",
 		"This loop runs unattended. There is no one to ask and no one to approve anything. A question you stop on is a question that stays unanswered until a human happens to look, which may be hours from now or after the queue has emptied itself.",
@@ -251,37 +308,21 @@ export function renderPlanPrompt(store: Store, task: Task, options: PromptOption
 	parts.push(atomicityRules(maxFiles));
 	parts.push(unattendedRule(options));
 
+	const v = DRIVER_VOCABULARY[options.mode];
 	parts.push(
-		options.mode === "tool"
-			? [
-					"## How to add them",
-					"Call `todo_add` once per item — `title`, `detail`, `level` (`act` or `plan`), and `kind` for an act. The parent is set for you.",
-					"Put what the worker will need in `detail` — it is the only context that item will ever have. But write it in one pass. If you cannot fill it in without working the design out first, that is a `plan`, not an act you deliberate into shape.",
-					"",
-					"## Finishing",
-					"When this round's items are written, call `todo_complete` with a one-line summary of what you decided and why.",
-					hasDone
-						? "If this item is genuinely finished — everything under it is done and there is no next step — add nothing at all and say so in the summary. An empty round is how a branch closes."
-						: "This is the first round, so it has to produce work: an empty round will be rejected.",
-					"Only call `todo_block` if you cannot plan at all — missing information, a contradiction, a broken precondition. It halts the whole queue for a human, so it is not the way to say \"this is smaller than it looked\".",
-				].join("\n")
-			: [
-					"## How to add them",
-					"Run, once per item:",
-					"",
-					"```",
-					`todo add <id> "<title>" --parent ${task.id} --level <act|plan> --kind <code|docs|research> --detail "<everything the worker needs>"`,
-					"```",
-					"",
-					"Put what the worker will need in `--detail` — it is the only context that item will ever have. But write it in one pass. If you cannot fill it in without working the design out first, that is a `plan`, not an act you deliberate into shape.",
-					"",
-					"## Finishing",
-					"When this round's items are written, stop. Your final message must be a one-line summary of what you decided and why.",
-					hasDone
-						? "If this item is genuinely finished — everything under it is done and there is no next step — add nothing at all and say so. An empty round is how a branch closes."
-						: "This is the first round, so it has to produce work: an empty round will be rejected.",
-					"Only say `BLOCKED:` if you cannot plan at all — missing information, a contradiction, a broken precondition. It halts the whole queue for a human.",
-				].join("\n"),
+		[
+			"## How to add them",
+			v.howToAdd(task.id),
+			"",
+			`Put what the worker will need in ${v.detailField} — it is the only context that item will ever have. But write it in one pass. If you cannot fill it in without working the design out first, that is a \`plan\`, not an act you deliberate into shape.`,
+			"",
+			"## Finishing",
+			v.finishPlan,
+			hasDone
+				? "If this item is genuinely finished — everything under it is done and there is no next step — add nothing at all and say so in the summary. An empty round is how a branch closes."
+				: "This is the first round, so it has to produce work: an empty round will be rejected.",
+			`Only ${v.blockVerb} if you cannot plan at all — missing information, a contradiction, a broken precondition. It halts the whole queue for a human, so it is not the way to say "this is smaller than it looked".`,
+		].join("\n"),
 	);
 
 	const rejected = rejectionBlock(
@@ -442,19 +483,8 @@ export function renderActPrompt(store: Store, task: Task, options: PromptOptions
 	const checks = verificationBlock(options);
 	if (checks) parts.push(checks);
 
-	parts.push(
-		options.mode === "tool"
-			? [
-					"## Finishing",
-					"When the task is genuinely done, call `todo_complete` with a one-line summary. That call is the only way to finish — stopping without it halts the loop.",
-					"If the task cannot be done as written, call `todo_block` with the reason instead of guessing.",
-				].join("\n")
-			: [
-					"## Finishing",
-					"When the task is genuinely done, stop. Your final message must be a one-line summary of what changed.",
-					"If the task cannot be done as written, say `BLOCKED:` followed by the reason.",
-				].join("\n"),
-	);
+	const v = DRIVER_VOCABULARY[options.mode];
+	parts.push(["## Finishing", v.finishAct, v.actBlocked].join("\n"));
 
 	return parts.join("\n\n");
 }
