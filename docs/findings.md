@@ -258,10 +258,12 @@ not show sections (c) ProfileControls.kt analysis or (d) MainActivity.kt
 confirmation — I cannot verify all four required subsections are present from the
 evidence provided."
 
-The verifier was right, and the missing content was ours. `verify.max_evidence_bytes`
-is 12000; `gatherEvidence` runs the assembled diff through `truncateHead`, which
-appends `[... truncated after N bytes ...]`. The worker's NOTES.md append ran past
-the budget and the tail was cut. Nothing in the payload distinguishes *the harness
+The verifier was right, and the missing content was ours — and the budget was far
+smaller than it looks. `verify.max_evidence_bytes` is 12000, but `gatherEvidence`
+splits it: `perPart = Math.max(1000, Math.floor(maxBytes / 3))`, shared by the
+diff, each command's output and the tool evidence. **The diff was capped at 4000
+bytes**, then run through `truncateHead`, which appended `[... truncated after N
+bytes ...]`. The worker's NOTES.md append ran well past that and the tail was cut. Nothing in the payload distinguishes *the harness
 trimmed this* from *the worker stopped short*, so a correct refusal reads as a
 failed attempt, the tree is reverted, and the retry reproduces it exactly. Two
 attempts burned; the third was live when we killed the run. The task was going to
@@ -299,6 +301,9 @@ local worker routinely cannot finish an act inside half an hour.
   verifier prompt never says that a truncation marker is the harness trimming
   rather than the worker stopping short, and never says not to reject for it.
   Fixing the label is cheap; raising `max_evidence_bytes` only moves the cliff.
+  **Fixed in `7de7245`:** `verify.max_diff_bytes` (48000) gives the diff its own
+  budget, markers name their author and their dropped byte count, and the
+  verifier is told a marker is never by itself grounds to fail.
 - **On-device evidence is still optional.** `evidence_tools` makes a tool result
   visible to the verifier when the worker chooses to run one. Nothing requires a
   UI act to have looked at the UI, and a screenshot is not in the loop at all.
