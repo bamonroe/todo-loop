@@ -202,6 +202,82 @@ file lives outside the repository and is truncated before every session, so a
 rejected attempt's install can never be credited to its retry. And promotion now
 waits until the attempts are spent.
 
+## Run 13: what a green build cannot see
+
+Seven and a half hours, 31 iterations, 23 commits, 14 items verified and 7
+planning rounds. Both run-12 fixes held: the docs act verified instead of
+cascading, and the scaffold passed on its first attempt. Killed at iteration 31
+rather than run to exhaustion.
+
+Then we installed the APK on the emulator and looked at it. It launches, it does
+not crash, every file compiles, lint is clean, and all JVM tests pass. The
+screen is wrong in two ways, and the interesting one is the first.
+
+### The defect lives in the seam between two tested units
+
+The band labels read "60 kHz", "230 kHz" ... "14000 kHz". The gains read
+"+300.0 dB". Both are off by exactly a thousand, for the same reason:
+`android.media.audiofx.Equalizer` reports centre frequencies in **milliHertz**
+and band levels in **millibels**. `SystemEqualizer` passes both straight through
+into an `EqualizerEngine` interface whose members are named `centerFrequencyForBand`,
+`gainForBand`, `minGainDb` and `maxGainDb`. Nothing converts.
+
+What matters is why it survived twenty-eight consecutive verifications:
+
+- `formatHz` is **correct**, and its five unit tests are correct. They pass Hz
+  in and assert on Hz. Nothing about them is wrong.
+- `SystemEqualizer` has **no tests at all**, and cannot have JVM ones — it needs
+  a device.
+
+Each side of the boundary is right on its own terms. The mismatch exists only
+where they meet, and that seam is reachable by no test either side could have
+written. The verifier sees one diff at a time, so it never saw both halves
+together. A compile gate, a lint gate and a passing unit suite are all
+structurally incapable of catching this class of bug.
+
+This is not the same as run 10's invisible sliders, which were a layout mistake.
+This is a contract violation between two modules that each pass their own gate,
+and it is the strongest argument yet that on-device evidence is not a nicety.
+
+### The layout is still wrong, and still compiles
+
+The vertical-slider decision — a horizontal M3 `Slider` under `Modifier.rotate(90f)`
+inside a fixed-size `Box`, which the probe act researched and NOTES.md records as
+"THE decision" — does not produce vertical sliders. It renders five short
+horizontal stubs crammed against the top of the screen, with the frequency labels
+stranded a third of the way down behind a large dead gap, and the last label
+wrapping onto two lines.
+
+The probe was honest about its limits: it verified that the expression compiles,
+and said so. Compiling was all it could check. Nobody looked.
+
+### The harness truncated the evidence, then charged the worker for it
+
+A research act was rejected twice with, verbatim: "The diff is truncated and does
+not show sections (c) ProfileControls.kt analysis or (d) MainActivity.kt
+confirmation — I cannot verify all four required subsections are present from the
+evidence provided."
+
+The verifier was right, and the missing content was ours. `verify.max_evidence_bytes`
+is 12000; `gatherEvidence` runs the assembled diff through `truncateHead`, which
+appends `[... truncated after N bytes ...]`. The worker's NOTES.md append ran past
+the budget and the tail was cut. Nothing in the payload distinguishes *the harness
+trimmed this* from *the worker stopped short*, so a correct refusal reads as a
+failed attempt, the tree is reverted, and the retry reproduces it exactly. Two
+attempts burned; the third was live when we killed the run. The task was going to
+block on a defect the harness introduced.
+
+A docs or research act is the worst case here, because its entire work product
+*is* the diff — there is no build log to fall back on.
+
+### Nearly half of all iterations hit a budget
+
+Fourteen budget overruns across 31 iterations: ten against the 30-minute worker
+timeout, four against the 10-minute plan timeout. One item — the instrumented
+smoke test — spent three attempts and ninety minutes producing nothing at all
+before promotion. The run's throughput problem is not rejection; it is that the
+local worker routinely cannot finish an act inside half an hour.
+
 ## Still open
 
 - **The project description contradicts Android.** It says the app adjusts
@@ -219,3 +295,21 @@ waits until the attempts are spent.
 - `todo doctor` warns about `detail` on non-leaf tasks, but a plan's detail *is*
   read, via the plan prompt. The warning is probably wrong for plans.
 - The eval harness in `eval/` has never been run. Run it or delete it.
+- **Truncation is not labelled as ours.** `truncateHead` marks the cut, but the
+  verifier prompt never says that a truncation marker is the harness trimming
+  rather than the worker stopping short, and never says not to reject for it.
+  Fixing the label is cheap; raising `max_evidence_bytes` only moves the cliff.
+- **On-device evidence is still optional.** `evidence_tools` makes a tool result
+  visible to the verifier when the worker chooses to run one. Nothing requires a
+  UI act to have looked at the UI, and a screenshot is not in the loop at all.
+  Run 13's unit bug needed exactly that and nothing less.
+- **`atomic.max_files = 5` is wrong for a scaffold**, which inherently touches
+  about twelve files. Later promotion mitigates it; the budget itself was never
+  revisited.
+- **A docs or research act should probably never be promotable.** Breaking a
+  one-file note into children is never the answer. `cf477d7` stops the run-11
+  cascade at its source, so this is belt-and-braces.
+- **`todo run --help` is not a flag** — it starts a real 50-iteration run.
+  Discovered by accident; cost a queue reset.
+- **`thinking_keep_bytes` has never fired live.** It only acts past
+  `prune_at_fraction` of the window, which no session has yet reached.
