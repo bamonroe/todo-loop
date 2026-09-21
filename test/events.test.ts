@@ -245,9 +245,10 @@ test("a message_update that carries no thinking delta is not parsed into thinkin
 });
 
 test("a text delta that merely mentions thinking_delta is not read as thinking", () => {
-	// The cheap line-level test is a filter, not the decision. A worker editing
-	// this very monitor writes the string "thinking_delta" into ordinary output,
-	// and that must not become the reasoning its retry inherits.
+	// A worker editing this very monitor writes the string into ordinary output.
+	// What saves us is that JSON escapes the quotes around it, so the substring
+	// filter does not match — which is worth pinning, because it is the reason
+	// the type check behind it can never be reached and never be tested.
 	const { m } = monitor();
 	m.feed(
 		event({

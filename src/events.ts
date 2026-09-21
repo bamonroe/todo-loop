@@ -305,6 +305,13 @@ export class SessionMonitor {
 			return;
 		}
 		const inner = event.assistantMessageEvent as { type?: string; delta?: unknown } | undefined;
+		// The type check is a backstop and, as things stand, unreachable: JSON
+		// escapes the quotes inside a string value, so a *text* delta whose
+		// content mentions thinking_delta does not match the substring filter
+		// above and never gets here. Kept deliberately, because the filter is a
+		// performance shortcut and this is the actual rule — widen or drop the
+		// filter and this is what still decides correctly. No test can kill it;
+		// the test below pins the filter instead.
 		if (!inner || inner.type !== "thinking_delta" || typeof inner.delta !== "string") return;
 		this.thought += inner.delta;
 		if (this.thought.length > this.maxThinkingBytes) {
