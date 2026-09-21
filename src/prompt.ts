@@ -293,6 +293,11 @@ export function renderPlanPrompt(store: Store, task: Task, options: PromptOption
 		].join("\n"),
 	);
 
+	// Ahead of the tooling, in both prompts: it governs how every tool result
+	// that follows is read, and a rule about reading arrives too late once the
+	// reading has been done.
+	parts.push(provenanceBlock());
+
 	// Directly after the look budget is named, and before anything is spent: a
 	// planner told about an outline tool only at the end has already grepped.
 	const planTools = toolingBlock(options.workerTools);
@@ -431,6 +436,58 @@ function inheritanceBlock(options: PromptOptions): string | undefined {
 }
 
 /**
+ * Which text in the window is evidence and which is the worker's own guessing.
+ *
+ * Measured, not supposed. Across the nineteen sessions of run 14, thirteen
+ * assistant blocks out of five hundred and twenty distrusted a tool result
+ * that was in fact correct — most of them a confabulation that the worker had
+ * put stray carriage returns into its own edit payloads. There were no
+ * carriage returns: not in any file, not in any of the run's tool calls, not
+ * in any of its results. Each session invented the belief from nothing, and
+ * then spent a turn grepping and re-reading files to disprove it. The variant
+ * that costs more is the opposite sign — iteration 5 spent its entire thirty
+ * minutes and seventeen android_api calls on a confident theory that the tool
+ * was hiding static members, and wrote no code at all. The tool had a real
+ * bug, but the bug was that a zero-match query rendered as almost nothing;
+ * what the worker did with that was build a model of the tool's internals and
+ * act on it.
+ *
+ * Both failures are the same failure: a claim the worker produced itself came
+ * back round and got treated as something it had found out. That confusion is
+ * not accidental here, it is configured. The local worker runs with
+ * `requiresThinkingAsText`, which converts its reasoning into ordinary
+ * assistant text before replaying it — so "maybe the stubs strip static info"
+ * re-enters the window looking exactly like a finding. The setting earns its
+ * place (without it the worker forgets numbers it chose one turn earlier), so
+ * the fix is not to remove the replay but to label the two kinds of text and
+ * say what each is worth.
+ *
+ * Tool *definitions* were the user's first suspicion and are not the problem:
+ * pi sends them in the API's `tools` array, a channel the worker cannot
+ * confuse with its own prose. The collapse is between tool results and
+ * self-authored text, which genuinely do arrive as the same kind of thing.
+ *
+ * Deliberately short, and deliberately two rules rather than a lecture. This
+ * renders on every act and every planning round, and a block long enough to
+ * need skimming is a block that gets skimmed.
+ */
+function provenanceBlock(): string {
+	return [
+		"## What in this conversation is evidence",
+		"Two kinds of text reach you and they read alike.",
+		"",
+		"**A tool result is the only thing here you did not write.** It is a machine reporting what happened, and on the subject of what it just did it is final. If an edit tool says it replaced a declaration, the declaration is replaced. If a lookup shows you a signature, that is the signature, whatever you remember. Do not spend a turn proving a tool result to yourself.",
+		"",
+		"**Everything else in the window is yours** — your plans, your reasoning, your account of what you just did. Your own thinking is replayed back to you as ordinary prose, so a guess you made three turns ago now reads exactly like something you established. Before you act on a claim about this codebase or these tools, ask where it came from. If the answer is that you said it earlier, it is still a guess.",
+		"",
+		"Two rules follow:",
+		"",
+		"- **Never re-verify that a tool did what it reported.** Verify what you *built* instead — compile it, run the tests, read the lint. That is a different question and it is always worth asking. Re-reading a file to check that an edit landed is not.",
+		"- **If you are explaining why a tool is broken, you are almost certainly wrong about the question you asked it.** An empty, short or surprising result nearly always means the query missed, not that the tool is defective. Re-read what the tool says it takes and ask it differently. You cannot see a tool's internals, so a theory about them is pure invention and acting on one can cost you the whole session.",
+	].join("\n");
+}
+
+/**
  * How to read and change code here.
  *
  * The counterpart to `worker_check`, and the same argument: a generic prompt
@@ -531,6 +588,8 @@ export function renderActPrompt(store: Store, task: Task, options: PromptOptions
 	// changes what this session should do first.
 	const inherited = inheritanceBlock(options);
 	if (inherited) parts.push(inherited);
+
+	parts.push(provenanceBlock());
 
 	const actTools = toolingBlock(options.workerTools);
 	if (actTools) parts.push(actTools);

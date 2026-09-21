@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ancestryOf, renderAssignmentPrompt, renderPinnedTask, renderActPrompt } from "../src/prompt.ts";
+import { findTask } from "../src/store.ts";
 import { parseStore } from "../src/store.ts";
 
 const store = parseStore(`
@@ -525,4 +526,49 @@ test("the inheritance comes before the tooling and the scope rules", () => {
 	const scope = prompt.indexOf("## Scope");
 	assert.ok(left >= 0 && tools >= 0 && scope >= 0);
 	assert.ok(left < tools && tools < scope);
+});
+
+test("both prompts say which text is evidence and which is the worker's own", () => {
+	// Two measured failures with one shape: a claim the worker produced itself
+	// came back round and was treated as something it had found out. The local
+	// worker's `requiresThinkingAsText` replays its reasoning as plain prose,
+	// so nothing in the window distinguishes the two by itself.
+	const store = parseStore(`[[task]]
+id = "eq"
+title = "A graphic equalizer app for Android"
+level = "plan"
+status = "todo"
+
+[[task]]
+id = "eq.bands"
+title = "Vertical band sliders in a Row"
+parent = "eq"
+status = "todo"
+`);
+	const options = { mode: "tool" as const };
+	for (const id of ["eq", "eq.bands"]) {
+		const text = renderAssignmentPrompt(store, findTask(store, id)!, options);
+		assert.match(text, /## What in this conversation is evidence/, id);
+		assert.match(text, /the only thing here you did not write/, id);
+		assert.match(text, /Never re-verify that a tool did what it reported/, id);
+		assert.match(text, /you are almost certainly wrong about the question you asked it/, id);
+	}
+});
+
+test("the provenance rules arrive before the tooling they govern", () => {
+	// A rule about how to read tool results is worth nothing once the results
+	// have been read, so its position is part of the fix, not cosmetics.
+	const store = parseStore(`[[task]]
+id = "eq"
+title = "A graphic equalizer app for Android"
+status = "todo"
+`);
+	const text = renderAssignmentPrompt(store, findTask(store, "eq")!, {
+		mode: "tool",
+		workerTools: "Use treesitter_outline before reading a file.",
+	});
+	assert.ok(
+		text.indexOf("## What in this conversation is evidence") < text.indexOf("treesitter_outline"),
+		"provenance must precede the tool guidance",
+	);
 });

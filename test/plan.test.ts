@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFAULT_CONFIG, type Config } from "../src/config.ts";
-import { checkPlanRound } from "../src/plan.ts";
+import { checkPlanRound, nearDuplicate, titleSimilarity } from "../src/plan.ts";
 import {
 	allowedChildLevels,
 	assignmentFor,
@@ -434,4 +434,28 @@ status = "done"
 attempts = 0
 `);
 	assert.doesNotMatch(renderTree(store), /not yet planned/);
+});
+
+test("title similarity reads through case and punctuation", () => {
+	// The pair that matters is a retry restating its own earlier title in
+	// different clothes. Compared raw, "ROTATE THE SIGNING SECRETS." shares
+	// almost no character bigram with the lowercase original and the repeat
+	// goes unnoticed.
+	const same = titleSimilarity("Rotate the signing secrets", "ROTATE THE SIGNING SECRETS.");
+	assert.ok(same > 0.95, `normalised titles should read as one: ${same}`);
+	assert.ok(titleSimilarity("Wire the enable switch", "Rotate the signing secrets") < 0.5);
+});
+
+test("the sibling reported is the closest one, not merely the first over the line", () => {
+	// A round adding a third variation has two candidates over the threshold.
+	// Naming the weaker match sends the worker to look at the wrong row, and
+	// it is the closer one that tells it what it already did.
+	const siblings = [
+		{ id: "a.loose", title: "Rotate the signing secrets for staging", status: "todo" },
+		{ id: "a.exact", title: "Rotate the signing secrets", status: "done" },
+	] as unknown as Parameters<typeof nearDuplicate>[1];
+
+	const hit = nearDuplicate("Rotate the signing secrets", siblings);
+	assert.equal(hit?.task.id, "a.exact");
+	assert.equal(hit?.score, 1);
 });
