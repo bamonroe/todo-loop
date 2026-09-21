@@ -201,6 +201,21 @@ export interface Config {
 		stub_min_bytes: number;
 		/** Cap on bash/grep output entering context at all. */
 		tool_output_max_bytes: number;
+		/**
+		 * Bytes of each *old* thinking block kept when the prune fires.
+		 *
+		 * Thinking reaches the model only when the provider replays it — for the
+		 * local worker that is `requiresThinkingAsText` on the model entry. Once it
+		 * does, it is ordinary content that grows every turn, which is the loop
+		 * that made dropping it look attractive in the first place. Keeping a fixed
+		 * tail bounds it: the retained amount stops growing after `keep_full_turns`
+		 * no matter how long the session runs, so there is no spiral to fall into.
+		 *
+		 * The tail rather than the head because a reasoning block spends most of
+		 * itself getting somewhere and states the conclusion at the end, and the
+		 * conclusion is the part the next turn needs. 0 drops old thinking outright.
+		 */
+		thinking_keep_bytes: number;
 	};
 	ollama: {
 		base_url: string;
@@ -296,6 +311,7 @@ export const DEFAULT_CONFIG: Config = {
 		keep_full_turns: 3,
 		stub_min_bytes: 2000,
 		tool_output_max_bytes: 2048,
+		thinking_keep_bytes: 600,
 	},
 	ollama: {
 		base_url: "http://localhost:11434/v1",
@@ -422,6 +438,10 @@ export function parseConfig(text: string): Config {
 			prune_at_fraction: pickNumber(context, "prune_at_fraction", DEFAULT_CONFIG.context.prune_at_fraction),
 			keep_full_turns: pickNumber(context, "keep_full_turns", DEFAULT_CONFIG.context.keep_full_turns),
 			stub_min_bytes: pickNumber(context, "stub_min_bytes", DEFAULT_CONFIG.context.stub_min_bytes),
+			thinking_keep_bytes: Math.max(
+				0,
+				pickNumber(context, "thinking_keep_bytes", DEFAULT_CONFIG.context.thinking_keep_bytes),
+			),
 			tool_output_max_bytes: pickNumber(
 				context,
 				"tool_output_max_bytes",

@@ -319,6 +319,50 @@ test("old bulky tool results are elided once context is tight", async () => {
 	assert.equal(texts[0].includes("go"), true);
 });
 
+test("old thinking is cut to its tail, recent thinking is left whole", async () => {
+	await run("todo-run");
+	const reasoning = `${"a".repeat(4000)}\nthe conclusion is that release() is idempotent`;
+	const messages = [
+		{ role: "user", content: [{ type: "text", text: "go" }] },
+		{ role: "assistant", content: [{ type: "thinking", thinking: reasoning }, { type: "text", text: "one" }] },
+		{ role: "toolResult", toolName: "read", content: [{ type: "text", text: "f" }] },
+		{ role: "assistant", content: [{ type: "thinking", thinking: reasoning }, { type: "text", text: "two" }] },
+		{ role: "toolResult", toolName: "read", content: [{ type: "text", text: "f" }] },
+		{ role: "assistant", content: [{ type: "thinking", thinking: reasoning }, { type: "text", text: "three" }] },
+	];
+	const result = (await h.emit("context", { messages })) as { messages: typeof messages };
+	assert.ok(result, "expected the context handler to rewrite messages");
+
+	const think = (i: number) =>
+		(result.messages[i].content as { type: string; thinking?: string }[]).find((b) => b.type === "thinking")
+			?.thinking ?? "";
+
+	// Past keep_full_turns: shortened, but the end — where the conclusion is — survives.
+	assert.ok(think(1).length < reasoning.length, "the old block is cut down");
+	assert.match(think(1), /release\(\) is idempotent/, "and its conclusion is what is kept");
+	// Inside keep_full_turns: untouched, so the turn it just took is fully in view.
+	assert.equal(think(5), reasoning, "recent thinking is left whole");
+	// Text blocks in the same message are not reasoning and are not the target.
+	assert.match(JSON.stringify(result.messages[1].content), /"one"/);
+});
+
+test("thinking_keep_bytes = 0 drops old reasoning without emptying the block", async () => {
+	fs.writeFileSync(
+		path.join(h.repo, "todoloop.toml"),
+		CONFIG.replace("tool_output_max_bytes = 64", "tool_output_max_bytes = 64\nthinking_keep_bytes = 0"),
+	);
+	await run("todo-run");
+	const messages = [
+		{ role: "assistant", content: [{ type: "thinking", thinking: "x".repeat(4000) }] },
+		{ role: "assistant", content: [{ type: "text", text: "a" }] },
+		{ role: "assistant", content: [{ type: "text", text: "b" }] },
+	];
+	const result = (await h.emit("context", { messages })) as { messages: typeof messages };
+	const block = (result.messages[0].content as { type: string; thinking?: string }[])[0];
+	assert.equal(block.thinking, "[earlier reasoning dropped]");
+	assert.notEqual(block.thinking, "", "an empty reasoning block is a wire-format problem we do not need");
+});
+
 test("context is left alone while there is headroom", async () => {
 	await run("todo-run");
 	h.ctx.getContextUsage = () => ({ tokens: 100, percent: 10, contextWindow: 1000 });

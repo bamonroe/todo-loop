@@ -97,6 +97,20 @@ stub_min_bytes = 2000
 # limit is far too generous for a 27B.
 tool_output_max_bytes = 2048
 
+# Bytes of each *older* thinking block kept when the prune fires. Only matters
+# when the provider actually replays reasoning — for a local ollama worker that
+# means `requiresThinkingAsText` on its model entry in models.json.
+#
+# Dropped entirely, the worker re-derives what it already worked out, and worse,
+# confabulates it: asked to repeat a number it chose a turn earlier it will state
+# a different one rather than admit the gap. Replayed in full, it grows every
+# turn until compaction fires and summarises thinking into more context. A fixed
+# tail is neither: past keep_full_turns the retained amount stops growing.
+#
+# The tail, not the head, because a reasoning block states its conclusion last.
+# 0 drops old thinking outright.
+thinking_keep_bytes = 600
+
 [ollama]
 base_url = "http://localhost:11434/v1"
 # Sampling for a *local* verifier, sent on the wire.

@@ -833,6 +833,37 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	/**
+	 * Shrink the thinking in one assistant turn that is already past.
+	 *
+	 * Reasoning reaches the model only when the provider replays it, which for
+	 * the local worker means `requiresThinkingAsText` on its model entry. Before
+	 * that it was thrown away every turn, and the worker paid for it: run 10 read
+	 * AudioEngine.kt seven times and ran the same grep twice eight minutes apart,
+	 * because the conclusions it had already reached were never in front of it.
+	 * Worse than the re-reading, a worker with no trace of its own reasoning
+	 * confabulates one — asked to repeat a number it had chosen a turn earlier it
+	 * stated a different number, confidently, rather than admitting the gap.
+	 *
+	 * Replaying it in full brings back the other failure, where thinking
+	 * accumulates until compaction fires and summarises thinking into yet more
+	 * context. Keeping a fixed tail is the middle: past `keep_full_turns` the
+	 * retained amount stops growing, so neither failure has room to develop.
+	 */
+	const trimThinking = (message: { content?: unknown }, keepBytes: number): number => {
+		if (!Array.isArray(message.content)) return 0;
+		let changed = 0;
+		for (const block of message.content as { type?: string; thinking?: string }[]) {
+			if (block?.type !== "thinking" || typeof block.thinking !== "string") continue;
+			if (Buffer.byteLength(block.thinking, "utf8") <= keepBytes) continue;
+			// Never empty: a provider replaying an empty reasoning block is a
+			// wire-format question we have no reason to take on.
+			block.thinking = keepBytes === 0 ? "[earlier reasoning dropped]" : truncateTail(block.thinking, keepBytes);
+			changed += 1;
+		}
+		return changed;
+	};
+
+	/**
 	 * Elide old tool results once context gets tight.
 	 *
 	 * Batched deliberately: llama.cpp and Ollama reuse the KV cache only across
@@ -866,6 +897,10 @@ export default function (pi: ExtensionAPI) {
 		let elided = 0;
 		for (let i = 0; i < cutoff; i++) {
 			const message = messages[i];
+			if (message.role === "assistant") {
+				elided += trimThinking(message, config.context.thinking_keep_bytes);
+				continue;
+			}
 			if (message.role !== "toolResult") continue;
 			const size = JSON.stringify(message.content ?? "").length;
 			if (size < config.context.stub_min_bytes) continue;
