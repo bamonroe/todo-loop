@@ -42,7 +42,7 @@ export interface RunTelemetry {
 const DEFAULT_MAX_TEXT_BYTES = 64 * 1024;
 
 /** Args worth naming in a one-line echo, most specific first. */
-const SUBJECT_KEYS = ["command", "cmd", "file_path", "filePath", "path", "pattern", "query", "url", "id", "title"];
+const SUBJECT_KEYS = ["command", "cmd", "file_path", "filePath", "path", "pattern", "query", "url", "id", "title", "summary", "reason"];
 
 /** One line of log for a tool call: the name, and just enough of its argument to recognise it. */
 function precis(args: unknown, limit = 120): string {

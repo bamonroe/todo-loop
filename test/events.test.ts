@@ -40,6 +40,19 @@ test("a tool with no recognisable subject still gets its arguments summarised", 
 	const { m, lines } = monitor();
 	m.feed(event({ type: "tool_execution_start", toolCallId: "a", toolName: "todo_add", args: { level: "act", parent: "eq" } }));
 	assert.equal(lines[0], '  → todo_add {"level":"act","parent":"eq"}');
+
+	// The loop's own tools say what they are doing in `summary` and `reason`,
+	// and those are the two calls that decide whether a task closes.
+	m.feed(event({ type: "tool_execution_start", toolCallId: "b", toolName: "todo_complete", args: { summary: "Planned three acts in order" } }));
+	m.feed(event({ type: "tool_execution_start", toolCallId: "c", toolName: "todo_block", args: { reason: "no such module" } }));
+	assert.deepEqual(lines.slice(1), ["  → todo_complete Planned three acts in order", "  → todo_block no such module"]);
+});
+
+test("a long argument is cut to one line", () => {
+	const { m, lines } = monitor();
+	m.feed(event({ type: "tool_execution_start", toolCallId: "a", toolName: "write", args: { file_path: "a".repeat(400), content: "x" } }));
+	assert.ok(lines[0].length < 140, `one tool call is one log line, got ${lines[0].length}`);
+	assert.ok(lines[0].endsWith("…"));
 });
 
 test("message_update is neither echoed nor counted, however much of it there is", () => {
