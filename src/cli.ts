@@ -366,6 +366,8 @@ function commandNext(env: Env, flags: Flags): number {
 			buildCommand: env.config.verify.build_command,
 			workerCheck: env.config.verify.worker_check,
 			workerTools: env.config.project.worker_tools,
+			interruptedThinking: task.interrupted_thinking,
+			carriedWork: env.store.loop.carried === task.id,
 			testCommand: env.config.verify.test_command,
 		}),
 	);
@@ -561,6 +563,39 @@ async function commandCheckpoint(env: Env, flags: Flags): Promise<number> {
 }
 
 /** A worker that cannot do the task as written says so rather than guessing. */
+/** What to do with the working tree of an attempt that did not pass. */
+export type TreeDisposition = "carry" | "preserve" | "revert";
+
+/**
+ * A verifier rejection and a timeout are not the same event, and the tree they
+ * leave behind should not be treated the same way.
+ *
+ * A rejection is a judgement that the work is wrong; building the retry on top
+ * of it builds on a mistake, so it goes. A timeout is a judgement about nothing
+ * — the model was still typing — and run 13 proved what discarding it costs:
+ * iterations 12 and 13 were killed while BandSliders.kt was written and
+ * compiling, `git reset --hard` deleted it, and the next attempt paid to write
+ * it again from nothing.
+ *
+ * "preserve" is the same decision one attempt later. On the last attempt there
+ * is no retry to carry the tree into, but reverting would still throw away
+ * every attempt's work at the moment a human is about to be handed the problem;
+ * committing it keeps both the work and a clean tree, which is what a promoted
+ * plan needs — its round is rejected if the diff is not empty.
+ *
+ * A planning round is excluded throughout: its output is queue entries, not
+ * files, and a truncated round's items are judged on their own terms.
+ */
+export function treeDisposition(options: {
+	timedOut: boolean;
+	planning: boolean;
+	attempts: number;
+	maxAttempts: number;
+}): TreeDisposition {
+	if (!options.timedOut || options.planning) return "revert";
+	return options.attempts < options.maxAttempts ? "carry" : "preserve";
+}
+
 export function findBlockMarker(output: string): string | undefined {
 	const matches = [...output.matchAll(/^\s*(?:\*\*)?BLOCKED(?:\*\*)?:\s*(.+)$/gim)];
 	const last = matches.at(-1);
@@ -573,6 +608,14 @@ interface PiRun {
 	output: string;
 	/** The worker was killed for overrunning loop.worker_timeout_ms. */
 	timedOut?: boolean;
+	/**
+	 * The reasoning of the message that was still being generated at the kill.
+	 *
+	 * Captured from the live event stream rather than the session file, because
+	 * a message that never ends never gets written to one. Empty for a worker
+	 * that exited normally — there is nothing there worth carrying.
+	 */
+	thinking?: string;
 	/** What the session did, for the log and for the reason a rejection carries. */
 	telemetry: RunTelemetry;
 }
@@ -685,6 +728,10 @@ function runPi(env: Env, prompt: string, dryRun: boolean, budgetMs = 0): Promise
 				code: timedOut ? EXIT_ERROR : (code ?? EXIT_ERROR),
 				output: monitor.text,
 				timedOut,
+				// Only from a kill. After a clean exit the monitor's buffer is
+				// empty anyway, because the last message ended; reading it here
+				// keeps that a fact about the data rather than a coincidence.
+				thinking: timedOut ? monitor.thinking : "",
 				telemetry: monitor.telemetry,
 			});
 		});
@@ -774,12 +821,18 @@ async function runLoop(
 			return EXIT_OK;
 		}
 
-		if (env.config.loop.checkpoint === "require-clean" && !(await isTreeClean(env.cwd, queueExcludes(env)))) {
+		// The gate exists to stop one task's leftovers being committed under the
+		// next task's name. A tree the loop itself chose to keep, for the very
+		// task about to run again, is not that: it is the retry's own unfinished
+		// work, and refusing to start on it would turn the carry into a halt.
+		const carried = env.store.loop.carried === task.id;
+		if (env.config.loop.checkpoint === "require-clean" && !carried && !(await isTreeClean(env.cwd, queueExcludes(env)))) {
 			console.error("working tree is dirty and checkpoint = require-clean; refusing to start a task");
 			env.store.loop.running = false;
 			persist();
 			return EXIT_ERROR;
 		}
+		if (carried) console.error(`  carrying forward ${task.id}'s unfinished work from the previous attempt`);
 
 		markDoing(env.store, task, await headCommit(env.cwd));
 		env.store.loop.iterations = iteration;
@@ -800,6 +853,8 @@ async function runLoop(
 			buildCommand: env.config.verify.build_command,
 			workerCheck: env.config.verify.worker_check,
 			workerTools: env.config.project.worker_tools,
+			interruptedThinking: task.interrupted_thinking,
+			carriedWork: env.store.loop.carried === task.id,
 			testCommand: env.config.verify.test_command,
 		});
 
@@ -911,14 +966,47 @@ async function runLoop(
 			if (dropped.length) console.error(`  discarded ${dropped.length} item(s) from the truncated round`);
 		}
 
-		// Undo the rejected attempt. This runs before any persist() below so the
-		// hard reset cannot roll back the failure it is reacting to: the store is
-		// written from memory afterwards. "off" means the caller manages the tree,
-		// so it manages the cleanup too.
+		// An act that ran out of clock keeps its tree. Everything else loses it.
+		//
+		// The two are not the same event. A verifier rejection is a judgement that
+		// the work is wrong, and starting the retry from it would build on a
+		// mistake. A timeout is a judgement about nothing at all — the model was
+		// still typing — and the code underneath is as likely to be right as
+		// anything else the worker produced. Run 13 killed iterations 12 and 13
+		// while BandSliders.kt was written and compiling; `git reset --hard`
+		// deleted it, and the next attempt paid to write it again from nothing.
+		//
+		// Planning rounds are excluded because their edits are queue entries, not
+		// files, and a truncated round's items are already handled above.
+		const disposition = treeDisposition({
+			timedOut: !!result.timedOut,
+			planning,
+			attempts,
+			maxAttempts: env.config.verify.max_attempts,
+		});
 		if (!dryRun && env.config.loop.checkpoint !== "off") {
-			const base = env.store.loop.base_commit ?? "";
-			if (await revertTo(env.cwd, base)) console.error(`  reverted the working tree to ${base.slice(0, 7)}`);
-			else console.error("  could not revert the working tree; the next iteration may refuse to start");
+			if (disposition === "carry") {
+				env.store.loop.carried = live.id;
+				live.interrupted_thinking = result.thinking?.trim() || undefined;
+				console.error("  kept the working tree: the worker ran out of clock, not out of ideas");
+			} else if (disposition === "preserve") {
+				// Out of attempts, and still nothing but a clock to blame. Reverting
+				// here would throw away every attempt's work at the exact moment a
+				// human is about to be handed the problem, and committing it leaves
+				// the tree clean for whatever the queue does next — a promoted plan
+				// has to start from an empty diff.
+				env.store.loop.carried = "";
+				live.interrupted_thinking = result.thinking?.trim() || undefined;
+				const subject = `${env.config.loop.commit_prefix}(${live.id}): incomplete — out of time after ${attempts} attempts`;
+				if (await commitAll(env.cwd, `${subject}\n\n${live.title}`)) {
+					console.error(`  committed the unfinished work rather than discarding it: ${subject}`);
+				}
+			} else {
+				env.store.loop.carried = "";
+				const base = env.store.loop.base_commit ?? "";
+				if (await revertTo(env.cwd, base)) console.error(`  reverted the working tree to ${base.slice(0, 7)}`);
+				else console.error("  could not revert the working tree; the next iteration may refuse to start");
+			}
 		}
 
 		// A cut-off act is the strongest size signal there is, so record it here,

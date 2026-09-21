@@ -498,6 +498,16 @@ matter most:
   already uncommitted when the loop starts is swept into a commit named after a
   task that did not do it, and the diff the verifier judges is wrong by the same
   amount. Refusing to start costs one `git stash`.
+
+  One exception, and it is the loop's own: an act that runs out of clock keeps
+  its working tree, and the next attempt is allowed to start on it. A verifier
+  rejection is a judgement that the work is wrong, so it is reverted; a timeout
+  is a judgement about nothing — the model was still typing. Run 13 killed two
+  iterations while the file they were writing was already compiling, and `git
+  reset --hard` deleted it. On the last attempt there is no retry to carry it
+  into, so the unfinished work is committed under an `incomplete` subject
+  instead: nothing is lost, and the tree is clean for a promoted plan, whose
+  round is rejected if the diff is not empty.
 - `loop.on_silent_stop` — `halt` (default) or `retry`.
 - `plan.max_children` / `plan.research_budget` / `plan.look_budget` /
   `plan.max_depth` / `plan.memory_file` — the size of a round, how many rounds a
@@ -523,6 +533,14 @@ matter most:
   tooling has to go on. Either way the rule is the same and is the part that
   matters: you cannot compile in your head, and do not finish on a failing
   build.
+- A killed attempt also hands its **reasoning** to its retry. The message being
+  generated when the budget runs out never finishes, so it never reaches the
+  session file; the driver reads the live event stream instead and keeps the
+  last 2,000 bytes of it. The retry gets it quoted, framed as a report on ground
+  already covered rather than a plan to resume — it is the thinking of a worker
+  that was losing. Run 13's iterations 25, 26 and 27 spent four and a half hours
+  each on the same dead end, because a retry begins from the task text and
+  nothing else.
 - `project.worker_tools` — how the worker is told to *read and change* code,
   as against `verify.worker_check`, which is how it is told to check the
   result. Same argument: nothing generic can name a project's tools, and a

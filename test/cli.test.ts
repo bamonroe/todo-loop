@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { after, before, test } from "node:test";
 import { promisify } from "node:util";
-import { workerArgs } from "../src/cli.ts";
+import { treeDisposition, workerArgs } from "../src/cli.ts";
 import { evidenceFilePath } from "../src/evidence.ts";
 import { DEFAULT_CONFIG, parseConfig } from "../src/config.ts";
 import { loadStore } from "../src/store.ts";
@@ -517,4 +517,29 @@ test("a planning round that runs long is not treated as oversized", async () => 
 
 	const plan = store.tasks.find((t) => t.id === "eq");
 	assert.notEqual(plan?.overflowed, true);
+});
+
+// ------------------------------------ what a failed attempt's tree is worth
+
+test("a verifier rejection loses its tree; a timeout keeps it", () => {
+	// The distinction the whole change rests on. One is a judgement that the
+	// work is wrong; the other is a judgement about nothing at all.
+	const base = { planning: false, attempts: 1, maxAttempts: 3 };
+	assert.equal(treeDisposition({ ...base, timedOut: false }), "revert");
+	assert.equal(treeDisposition({ ...base, timedOut: true }), "carry");
+});
+
+test("the last attempt's work is committed rather than carried or discarded", () => {
+	// There is no retry left to carry it into, but reverting would throw away
+	// every attempt's work just as a human is handed the problem — and a
+	// promoted plan needs a clean tree, because a non-empty diff rejects it.
+	assert.equal(treeDisposition({ timedOut: true, planning: false, attempts: 3, maxAttempts: 3 }), "preserve");
+	assert.equal(treeDisposition({ timedOut: true, planning: false, attempts: 4, maxAttempts: 3 }), "preserve");
+});
+
+test("a planning round never carries a tree, however it ended", () => {
+	// Its output is queue entries, not files; a non-empty diff is what rejects
+	// a plan in the first place.
+	assert.equal(treeDisposition({ timedOut: true, planning: true, attempts: 1, maxAttempts: 3 }), "revert");
+	assert.equal(treeDisposition({ timedOut: false, planning: true, attempts: 1, maxAttempts: 3 }), "revert");
 });

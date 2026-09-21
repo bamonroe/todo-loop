@@ -30,6 +30,8 @@ export interface TaskState {
 	overflow_reason?: string;
 	/** Every rejection this task has collected, oldest first. */
 	rejections?: string[];
+	/** Reasoning from an attempt that was killed mid-message, for its retry. */
+	interrupted_thinking?: string;
 }
 
 export interface LoopState {
@@ -38,6 +40,17 @@ export interface LoopState {
 	iterations: number;
 	base_commit: string;
 	last_failure: string;
+	/**
+	 * The task whose unfinished work is deliberately still on disk.
+	 *
+	 * Set when an act runs out of clock. A timeout is not a verdict that the
+	 * work is wrong, and reverting it discards code that was compiling — run 13
+	 * killed iterations 12 and 13 while BandSliders.kt was written and building,
+	 * and `git reset --hard` deleted it, so the retry re-derived it from
+	 * nothing. Named rather than a bare flag so the clean-tree gate can let
+	 * through exactly this task's mess and nobody else's.
+	 */
+	carried?: string;
 }
 
 export interface Sidecar {
@@ -56,7 +69,7 @@ const HEADER =
 	"# about the work itself is recorded here.";
 
 export function emptyLoopState(): LoopState {
-	return { running: false, current: "", iterations: 0, base_commit: "", last_failure: "" };
+	return { running: false, current: "", iterations: 0, base_commit: "", last_failure: "", carried: "" };
 }
 
 export function emptySidecar(): Sidecar {
@@ -110,6 +123,8 @@ export function parseSidecar(text: string): Sidecar {
 			const kept = row.rejections.map((value) => asString(value)).filter(Boolean);
 			if (kept.length) state.rejections = kept;
 		}
+		const thinking = asString(row.interrupted_thinking);
+		if (thinking) state.interrupted_thinking = thinking;
 		tasks.set(id, state);
 	}
 
@@ -120,6 +135,7 @@ export function parseSidecar(text: string): Sidecar {
 			iterations: asNumber(loopTable.iterations),
 			base_commit: asString(loopTable.base_commit),
 			last_failure: asString(loopTable.last_failure),
+			carried: asString(loopTable.carried),
 		},
 		tasks,
 	};
@@ -135,7 +151,8 @@ function isEmptyState(state: TaskState): boolean {
 		!state.reason &&
 		!state.overflowed &&
 		!state.overflow_reason &&
-		!state.rejections?.length
+		!state.rejections?.length &&
+		!state.interrupted_thinking
 	);
 }
 
@@ -151,6 +168,7 @@ export function serializeSidecar(sidecar: Sidecar): string {
 		if (state.overflowed) row.overflowed = true;
 		if (state.overflow_reason) row.overflow_reason = state.overflow_reason;
 		if (state.rejections?.length) row.rejections = state.rejections;
+		if (state.interrupted_thinking) row.interrupted_thinking = state.interrupted_thinking;
 		rows.push(row);
 	}
 

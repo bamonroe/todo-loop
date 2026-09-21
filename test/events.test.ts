@@ -190,3 +190,56 @@ test("the telemetry a caller reads is a snapshot, not the monitor's own state", 
 	assert.equal(snapshot.tools, 1);
 	assert.deepEqual(snapshot.byTool, { bash: 1 });
 });
+
+// ------------------------------------------- the thinking of a dying worker
+
+/** One thinking delta, shaped exactly as pi --mode json emits it. */
+const thinking = (delta: string): string =>
+	event({ type: "message_update", usage: {}, assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta } });
+
+test("an unfinished message's reasoning survives the kill that ends it", () => {
+	// The only case that matters. A message still being generated when the
+	// budget runs out never produces a message_end, so the delta stream is the
+	// only place its reasoning exists — and only while the process is alive.
+	const { m } = monitor();
+	m.feed(thinking("The decompiler route "));
+	m.feed(thinking("is not working: javap "));
+	m.feed(thinking("cannot read the Compose jar."));
+	assert.equal(m.thinking, "The decompiler route is not working: javap cannot read the Compose jar.");
+});
+
+test("a finished message's reasoning is dropped, because it is spent", () => {
+	// pi discards it between turns, the worker already acted on it, and carrying
+	// the previous turn's thoughts into a retry would describe the wrong moment.
+	const { m } = monitor();
+	m.feed(thinking("First I will read the file."));
+	m.feed(assistant("Reading it now."));
+	assert.equal(m.thinking, "");
+});
+
+test("only the last thoughts before the kill are kept", () => {
+	const { m } = monitor();
+	const small = new SessionMonitor({ maxThinkingBytes: 20 });
+	for (let i = 0; i < 50; i++) small.feed(thinking(`chunk${i} `));
+	assert.ok(small.thinking.length <= 20, small.thinking);
+	assert.ok(small.thinking.includes("chunk49"), "the tail, where a reasoning block states its conclusion");
+	assert.ok(!small.thinking.includes("chunk0 "), "not the head");
+	assert.equal(m.thinking, "");
+});
+
+test("reading the deltas does not turn message_update into a counted event", () => {
+	// The cost argument for skipping these lines still has to hold: they are one
+	// per token, and nothing about them is a turn, a tool call or an output.
+	const { m, lines } = monitor();
+	m.feed(thinking("thinking hard"));
+	assert.deepEqual(lines, [], "not echoed");
+	assert.equal(m.telemetry.turns, 0);
+	assert.equal(m.telemetry.tools, 0);
+	assert.ok(m.telemetry.sawEvents);
+});
+
+test("a message_update that carries no thinking delta is not parsed into thinking", () => {
+	const { m } = monitor();
+	m.feed(event({ type: "message_update", usage: {}, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "hello" } }));
+	assert.equal(m.thinking, "");
+});

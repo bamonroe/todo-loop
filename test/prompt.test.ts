@@ -472,3 +472,57 @@ test("shared prose cannot drift between driver modes", () => {
 		assert.match(prompt, /An empty round is how a branch closes|an empty round will be rejected/);
 	}
 });
+
+// ------------------------------------------- what a killed attempt hands on
+
+test("a retry is told its predecessor's edits are still on disk", () => {
+	const prompt = renderActPrompt(store, task, { mode: "tool", carriedWork: true });
+	assert.match(prompt, /## What the last attempt left you/);
+	assert.match(prompt, /still in the working tree/);
+	assert.match(prompt, /stopped by the clock, not rejected for being wrong/);
+	assert.match(prompt, /git diff/, "and how to look at it");
+});
+
+test("the dying worker's last thoughts are quoted, and framed as a lead not a plan", () => {
+	// Run 13's 25/26/27: the same dead end three times, four and a half hours
+	// each, because a retry begins from the task text and nothing else.
+	const prompt = renderActPrompt(store, task, {
+		mode: "tool",
+		interruptedThinking: "javap cannot read the Compose jar, so decompiling by hand is a dead end.",
+	});
+	assert.match(prompt, /javap cannot read the Compose jar/);
+	assert.match(prompt, /cut off mid-thought/);
+	assert.match(prompt, /not as a plan to resume/, "it ran out of time; it was not winning");
+	assert.match(prompt, /what has already been tried/);
+});
+
+test("both halves render together without repeating themselves", () => {
+	const prompt = renderActPrompt(store, task, { mode: "tool", carriedWork: true, interruptedThinking: "half way through BandSliders" });
+	assert.equal(prompt.match(/## What the last attempt left you/g)?.length, 1);
+	assert.match(prompt, /still in the working tree/);
+	assert.match(prompt, /half way through BandSliders/);
+});
+
+test("an ordinary attempt inherits nothing and is told nothing", () => {
+	for (const options of [
+		{ mode: "tool" as const },
+		{ mode: "tool" as const, carriedWork: false, interruptedThinking: "   " },
+	]) {
+		assert.doesNotMatch(renderActPrompt(store, task, options), /What the last attempt left you/);
+	}
+});
+
+test("the inheritance comes before the tooling and the scope rules", () => {
+	// What is already on disk changes what the session should do first, so it
+	// cannot arrive after the instructions about how to start.
+	const prompt = renderActPrompt(store, task, {
+		mode: "tool",
+		carriedWork: true,
+		workerTools: "Use treesitter_outline.",
+	});
+	const left = prompt.indexOf("## What the last attempt left you");
+	const tools = prompt.indexOf("## How to read and change code here");
+	const scope = prompt.indexOf("## Scope");
+	assert.ok(left >= 0 && tools >= 0 && scope >= 0);
+	assert.ok(left < tools && tools < scope);
+});

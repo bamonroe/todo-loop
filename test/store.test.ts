@@ -11,6 +11,7 @@ import {
 	nextReady,
 	parentOf,
 	parseStore,
+	promoteToPlan,
 	recordFailure,
 	renderTree,
 	rollup,
@@ -222,4 +223,52 @@ attempts = 0
 `);
 	assert.deepEqual(discardChildren(store, "solo"), []);
 	assert.equal(store.tasks.length, 1);
+});
+
+// ---------------------------------- what a killed attempt leaves on the row
+
+const killed = `
+[[task]]
+id = "a"
+title = "Write the sliders"
+status = "todo"
+attempts = 1
+interrupted_thinking = "javap cannot read the Compose jar; decompiling by hand is a dead end"
+`;
+
+test("a killed attempt's reasoning survives a save and a reload", () => {
+	const store = parseStore(killed);
+	assert.match(store.tasks[0].interrupted_thinking ?? "", /decompiling by hand is a dead end/);
+	const again = parseStore(serializeStore(store));
+	assert.equal(again.tasks[0].interrupted_thinking, store.tasks[0].interrupted_thinking);
+});
+
+test("the carried-tree marker survives a save and a reload", () => {
+	const store = parseStore(killed);
+	store.loop.carried = "a";
+	assert.equal(parseStore(serializeStore(store)).loop.carried, "a");
+});
+
+test("finishing the work drops the reasoning and the marker", () => {
+	// Otherwise they follow the id into the archive and are written out on every
+	// save from then on.
+	const store = parseStore(killed);
+	store.loop.carried = "a";
+	markDone(store, store.tasks[0], "shipped");
+	assert.equal(store.tasks[0].interrupted_thinking, undefined);
+	assert.equal(store.loop.carried, "");
+});
+
+test("blocking keeps the reasoning, because that is what a human reads", () => {
+	const store = parseStore(killed);
+	markBlocked(store, store.tasks[0], "out of attempts");
+	assert.match(store.tasks[0].interrupted_thinking ?? "", /dead end/);
+});
+
+test("promotion drops it, since nobody will implement that act now", () => {
+	const store = parseStore(killed);
+	store.loop.carried = "a";
+	promoteToPlan(store, store.tasks[0], "too big");
+	assert.equal(store.tasks[0].interrupted_thinking, undefined);
+	assert.equal(store.loop.carried, "");
 });

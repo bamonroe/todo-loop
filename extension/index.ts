@@ -372,6 +372,11 @@ export default function (pi: ExtensionAPI) {
 			buildCommand: config.verify.build_command,
 			workerCheck: config.verify.worker_check,
 			workerTools: config.project.worker_tools,
+			// Never set by this driver — it has no worker to kill — but a task row
+			// can carry them in from a shell-driver run that was stopped, and the
+			// retry deserves them whichever driver picks it up.
+			interruptedThinking: task.interrupted_thinking,
+			carriedWork: store.loop.carried === task.id,
 			testCommand: config.verify.test_command,
 		});
 

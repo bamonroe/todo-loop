@@ -121,6 +121,17 @@ export interface Task {
 	 */
 	rejections?: string[];
 	/**
+	 * What the last attempt was reasoning about when its budget ran out.
+	 *
+	 * Only ever set by a *killed* attempt, and cleared by any attempt that
+	 * finishes a message. It is the one thing a retry of an overrunning task has
+	 * that nothing else can give it: run 13's iterations 25, 26 and 27 spent
+	 * four and a half hours each walking into the same dead end, because each
+	 * retry began from the task text with no knowledge that two predecessors had
+	 * already tried exactly that.
+	 */
+	interrupted_thinking?: string;
+	/**
 	 * Every field on the task that this loop has no opinion about — category,
 	 * tags, created, a project's own per-task flags — kept verbatim so a write
 	 * cannot drop them. Deliberately holds *only* the unmodelled fields: a second
@@ -169,6 +180,7 @@ const BOOKKEEPING = [
 	"overflowed",
 	"overflow_reason",
 	"rejections",
+	"interrupted_thinking",
 ];
 
 /** Keys `Task` models directly, and which therefore never belong in `extra`. */
@@ -353,6 +365,8 @@ function readTask(raw: TomlTable, schema: Schema, archived: boolean): Task | und
 		const kept = raw.rejections.map((value) => asString(value)).filter(Boolean);
 		if (kept.length) task.rejections = kept;
 	}
+	const thinking = asString(raw.interrupted_thinking);
+	if (thinking) task.interrupted_thinking = thinking;
 	return task;
 }
 
@@ -379,6 +393,7 @@ function applySidecar(tasks: Task[], sidecar: Sidecar): void {
 		if (state.overflowed) task.overflowed = true;
 		if (state.overflow_reason) task.overflow_reason = state.overflow_reason;
 		if (state.rejections?.length) task.rejections = [...state.rejections];
+		if (state.interrupted_thinking) task.interrupted_thinking = state.interrupted_thinking;
 	}
 }
 
@@ -431,6 +446,7 @@ export function parseStore(text: string, options: ParseOptions = {}): Store {
 			iterations: asNumber(loopTable.iterations),
 			base_commit: asString(loopTable.base_commit),
 			last_failure: asString(loopTable.last_failure),
+			carried: asString(loopTable.carried),
 		};
 		delete store.doc.loop;
 	}
@@ -500,6 +516,7 @@ function taskTable(task: Task, schema: Schema): TomlTable {
 		setOrDelete(values, "overflow_reason", task.overflow_reason);
 		if (task.rejections?.length) values.rejections = [...task.rejections];
 		else delete values.rejections;
+		setOrDelete(values, "interrupted_thinking", task.interrupted_thinking);
 	}
 
 	return ordered(values, schema.fieldOrder);
@@ -544,6 +561,7 @@ export function sidecarOf(store: Store): Sidecar {
 		if (task.overflowed) state.overflowed = true;
 		if (task.overflow_reason) state.overflow_reason = task.overflow_reason;
 		if (task.rejections?.length) state.rejections = [...task.rejections];
+		if (task.interrupted_thinking) state.interrupted_thinking = task.interrupted_thinking;
 		sidecar.tasks.set(task.id, state);
 	}
 	return sidecar;
@@ -1018,6 +1036,14 @@ export function markDone(store: Store, task: Task, summary: string, cascade = tr
 	archiveTask(store, task);
 	if (store.loop.current === task.id) store.loop.current = "";
 	store.loop.last_failure = "";
+	// The work landed, so an earlier attempt's dying thoughts are not just
+	// stale — they would follow the id into the archive and be written out on
+	// every save from here on.
+	// `delete`, not `= undefined`: this row is about to be archived and compared
+	// against a reparse of itself, and a key present with an undefined value is
+	// not the same object as one without the key.
+	delete task.interrupted_thinking;
+	if (store.loop.carried === task.id) store.loop.carried = "";
 	if (cascade) rollup(store);
 }
 
@@ -1026,6 +1052,9 @@ export function markBlocked(store: Store, task: Task, reason: string): void {
 	task.reason = reason;
 	store.loop.current = "";
 	store.loop.running = false;
+	// Kept, unlike on the done path. A blocked task is what a human comes back
+	// to, and the last thing the worker was thinking before the clock ran out is
+	// the most useful thing on the row.
 }
 
 export function recordFailure(store: Store, task: Task, reason: string): number {
@@ -1064,8 +1093,11 @@ export function promoteToPlan(store: Store, task: Task, reason: string): void {
 	task.summary = undefined;
 	task.done_at = undefined;
 	// The rejections were about implementing it, and it is not going to be
-	// implemented now. Carrying them into a breakdown prompt is noise.
+	// implemented now. Carrying them into a breakdown prompt is noise, and so
+	// is a dying worker's reasoning about an implementation nobody will attempt.
 	task.rejections = undefined;
+	task.interrupted_thinking = undefined;
+	if (store.loop.carried === task.id) store.loop.carried = "";
 	if (store.loop.current === task.id) store.loop.current = "";
 	store.loop.last_failure = "";
 }

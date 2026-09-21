@@ -41,6 +41,17 @@ export interface RunTelemetry {
  */
 const DEFAULT_MAX_TEXT_BYTES = 64 * 1024;
 
+/**
+ * How much of an unfinished message's reasoning to keep.
+ *
+ * The tail, because a reasoning block states its conclusion last, and small
+ * because this is carried into a retry prompt where every token displaces the
+ * task. Run 13's worst single message generated 13,937 tokens over 1,035
+ * seconds and produced 277 characters of tool arguments; the 2,000 bytes before
+ * the kill are the part worth having.
+ */
+const DEFAULT_MAX_THINKING_BYTES = 2000;
+
 /** Args worth naming in a one-line echo, most specific first. */
 const SUBJECT_KEYS = ["command", "cmd", "file_path", "filePath", "path", "pattern", "query", "url", "id", "title", "summary", "reason"];
 
@@ -95,6 +106,7 @@ interface MonitorOptions {
 	onLine?: (line: string) => void;
 	now?: () => number;
 	maxTextBytes?: number;
+	maxThinkingBytes?: number;
 }
 
 /**
@@ -109,8 +121,10 @@ export class SessionMonitor {
 	private readonly onLine: (line: string) => void;
 	private readonly now: () => number;
 	private readonly maxTextBytes: number;
+	private readonly maxThinkingBytes: number;
 	private buffer = "";
 	private said = "";
+	private thought = "";
 	private readonly running = new Map<string, { name: string; at: number }>();
 	private state = emptyTelemetry();
 
@@ -118,6 +132,7 @@ export class SessionMonitor {
 		this.onLine = options.onLine ?? ((): void => {});
 		this.now = options.now ?? Date.now;
 		this.maxTextBytes = options.maxTextBytes ?? DEFAULT_MAX_TEXT_BYTES;
+		this.maxThinkingBytes = options.maxThinkingBytes ?? DEFAULT_MAX_THINKING_BYTES;
 	}
 
 	feed(chunk: string): void {
@@ -144,6 +159,26 @@ export class SessionMonitor {
 	}
 
 	/**
+	 * The reasoning of the message that never finished — empty once one does.
+	 *
+	 * This is the whole reason the deltas are read at all. A *completed*
+	 * message's thinking is worthless to us: pi discards it between turns, the
+	 * worker has already acted on it, and `message_end` would hand it over
+	 * anyway. The message that matters is the one still being generated when the
+	 * budget runs out, and that message never produces a `message_end` — so the
+	 * only place its reasoning exists is the delta stream, live, and only for as
+	 * long as the process is alive to emit it.
+	 *
+	 * Run 13 killed eight sessions this way and kept nothing from any of them.
+	 * Iterations 25, 26 and 27 then spent four and a half hours walking into the
+	 * same dead end three times, because a retry starts from the task text and
+	 * nothing else.
+	 */
+	get thinking(): string {
+		return this.thought.trim();
+	}
+
+	/**
 	 * Read whenever, including mid-session from the timeout handler — which is
 	 * the point. `inFlight` is resolved against the clock at this moment, so the
 	 * elapsed time is how long the stuck tool has actually been stuck.
@@ -167,6 +202,11 @@ export class SessionMonitor {
 		// reorders the keys and this test stops matching.
 		if (trimmed.startsWith('{"type":"message_update"')) {
 			this.state.sawEvents = true;
+			// One exception to not parsing these, and it is paid for: a thinking
+			// delta arrives once per token at ~15 tokens a second, so parsing only
+			// the lines that carry one costs nothing measurable and is the only
+			// way to see inside a message that will never end.
+			if (trimmed.includes('"thinking_delta"')) this.thinkingDelta(trimmed);
 			return;
 		}
 		if (!trimmed.startsWith("{")) {
@@ -216,6 +256,10 @@ export class SessionMonitor {
 				this.echo("  … compacting the session");
 				return;
 			case "message_end":
+				// The message finished, so its reasoning is spent: the worker acted
+				// on it, and pi will not carry it into the next turn either. Only an
+				// *unfinished* one is worth handing to a retry.
+				this.thought = "";
 				this.assistant(event.message);
 				return;
 			default:
@@ -251,6 +295,21 @@ export class SessionMonitor {
 		if (!text) return;
 		this.echo(text);
 		this.remember(text);
+	}
+
+	private thinkingDelta(line: string): void {
+		let event: Record<string, unknown>;
+		try {
+			event = JSON.parse(line) as Record<string, unknown>;
+		} catch {
+			return;
+		}
+		const inner = event.assistantMessageEvent as { type?: string; delta?: unknown } | undefined;
+		if (!inner || inner.type !== "thinking_delta" || typeof inner.delta !== "string") return;
+		this.thought += inner.delta;
+		if (this.thought.length > this.maxThinkingBytes) {
+			this.thought = this.thought.slice(this.thought.length - this.maxThinkingBytes);
+		}
 	}
 
 	private echo(line: string): void {

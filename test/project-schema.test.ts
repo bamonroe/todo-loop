@@ -345,6 +345,22 @@ test("rejections accumulate instead of replacing each other", () => {
 	assert.deepEqual(findTask(loadStore(file), "lock")?.rejections, ["first", "second"]);
 });
 
+test("a killed attempt's reasoning goes to the sidecar, not the project's queue", () => {
+	// Same rule as the attempt counter: it is the loop's bookkeeping, and the
+	// project's own CLI rewrites its file from a fixed field list.
+	const dir = scratch();
+	const file = path.join(dir, "TASKS.toml");
+	fs.writeFileSync(file, GATED);
+	fs.writeFileSync(path.join(dir, "FINISHED.toml"), FINISHED);
+	const onDisk = loadStore(file);
+	const target = findTask(onDisk, "lock") as Task;
+	target.interrupted_thinking = "was part way through the boolean op";
+	saveStore(file, onDisk);
+	assert.ok(!fs.readFileSync(file, "utf8").includes("interrupted_thinking"));
+	assert.match(fs.readFileSync(sidecarPathFor(file), "utf8"), /interrupted_thinking/);
+	assert.equal(findTask(loadStore(file), "lock")?.interrupted_thinking, "was part way through the boolean op");
+});
+
 test("blocking a task writes the reason the project's validator insists on", () => {
 	const store = parseStore(GATED, { archiveText: "", archiveFile: "FINISHED.toml" });
 	markBlocked(store, findTask(store, "lock") as Task, "OpenCASCADE will not build in the container");

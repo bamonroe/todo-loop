@@ -58,6 +58,10 @@ export interface PromptOptions {
 	testCommand?: string;
 	/** How this project's code is read and changed — its tools, in its own words. */
 	workerTools?: string;
+	/** What the previous attempt was reasoning about when its budget ran out. */
+	interruptedThinking?: string;
+	/** True when the previous attempt's unfinished edits are still on disk. */
+	carriedWork?: boolean;
 }
 
 /**
@@ -388,6 +392,45 @@ function siblingTitles(store: Store, task: Task): string[] {
  * a failure is the compiler error alone.
  */
 /**
+ * What the killed attempt left behind: its edits, and its last thoughts.
+ *
+ * Both halves exist because a retry is otherwise a re-roll. Run 13's
+ * iterations 25, 26 and 27 spent four and a half hours each decompiling Compose
+ * jars by hand — the same dead end, three times — because every retry began
+ * from the task text and could not know that two predecessors had already
+ * walked down it and run out of clock there.
+ *
+ * The reasoning is presented as a lead and explicitly not as an instruction.
+ * It is the thinking of a worker that was *losing*: it ran out of time, so
+ * whatever it was in the middle of is at least as likely to be the trap as the
+ * answer. What it reliably gives the retry is the shape of the ground already
+ * covered, which is the one thing a fresh session cannot derive.
+ */
+function inheritanceBlock(options: PromptOptions): string | undefined {
+	const thinking = options.interruptedThinking?.trim();
+	if (!options.carriedWork && !thinking) return undefined;
+	const lines = ["## What the last attempt left you"];
+	if (options.carriedWork) {
+		lines.push(
+			"**Its edits are still in the working tree.** It was stopped by the clock, not rejected for being wrong, so its work was kept instead of thrown away. Start by looking at what is already changed — `git status` and `git diff` — and continue from there rather than beginning again. Some of it may be half-written; finishing or fixing it is part of this task.",
+		);
+	}
+	if (thinking) {
+		if (options.carriedWork) lines.push("");
+		lines.push(
+			"It was cut off mid-thought. These were its last few hundred words, verbatim:",
+			"",
+			"```",
+			thinking,
+			"```",
+			"",
+			"Read that as a report on where it had got to, not as a plan to resume. It ran out of time, so whatever it was in the middle of is at least as likely to be the reason it ran out. What it does tell you is what has already been tried — do not spend this session arriving back at the same place.",
+		);
+	}
+	return lines.join("\n");
+}
+
+/**
  * How to read and change code here.
  *
  * The counterpart to `worker_check`, and the same argument: a generic prompt
@@ -483,6 +526,11 @@ export function renderActPrompt(store: Store, task: Task, options: PromptOptions
 			].join("\n"),
 		);
 	}
+
+	// Before the tooling and before the scope rules: what is already on disk
+	// changes what this session should do first.
+	const inherited = inheritanceBlock(options);
+	if (inherited) parts.push(inherited);
 
 	const actTools = toolingBlock(options.workerTools);
 	if (actTools) parts.push(actTools);
