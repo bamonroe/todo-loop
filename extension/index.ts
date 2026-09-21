@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { uuidv7, type Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { DEFAULT_CONFIG, inheritsWorker, loadConfig, splitModelRef, type Config } from "../src/config.ts";
+import { childEnv, DEFAULT_CONFIG, inheritsWorker, loadConfig, splitModelRef, type Config } from "../src/config.ts";
 import {
 	changedFiles,
 	commitAll,
@@ -282,6 +282,10 @@ export default function (pi: ExtensionAPI) {
 			// Only set once a recorded tool has actually run, so a session that
 			// called none reads no file at all.
 			evidenceFile,
+			// In-session this mostly re-applies what the driver already put in
+			// our own environment. It matters for the in-session loop shape,
+			// where there is no driver above us to have applied anything.
+			env: childEnv(config),
 		});
 
 		// A round is judged entirely by tooling — no model, no network, no cost.

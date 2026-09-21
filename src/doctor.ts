@@ -14,9 +14,10 @@
  */
 
 import { execFile } from "node:child_process";
+import * as fs from "node:fs";
 import { promisify } from "node:util";
 import type { Config } from "./config.ts";
-import { inheritsWorker, isLocalRef, piDefaultRef, splitModelRef } from "./config.ts";
+import { inheritsWorker, isLocalRef, piDefaultRef, reservedEnv, splitModelRef } from "./config.ts";
 import { isGitRepo, isTreeClean, loopOwnedPaths } from "./evidence.ts";
 import { endpointFor, piAuthProviders, REMOTE_PROVIDERS, type Endpoint } from "./providers.ts";
 import {
@@ -469,6 +470,48 @@ export function modelChecks(config: Config, env: ModelEnvironment): Check[] {
 	return checks;
 }
 
+/**
+ * What `[env]` will actually do, which is not always what it says.
+ *
+ * Two things can be checked without knowing what any variable means. A
+ * reserved name is declared and will be ignored — silence there would leave a
+ * project quietly not getting what its file plainly asks for. And a value that
+ * is an absolute path to nothing is almost always a stale path: pointing a
+ * tool at a project is what this table is mostly for, and a path that moved
+ * fails much later, inside a worker session, as a tool that inexplicably finds
+ * nothing.
+ *
+ * Nothing here can be a failure. A variable's meaning belongs to whatever
+ * reads it, and a doctor that refused to start a run over a path it does not
+ * understand would be wrong more often than right.
+ */
+export function envChecks(config: Config, exists: (path: string) => boolean = fs.existsSync): Check[] {
+	const names = Object.keys(config.env);
+	if (!names.length) return [];
+
+	const checks: Check[] = [{ level: "ok", label: "project env", detail: names.join(", ") }];
+
+	const reserved = reservedEnv(config);
+	if (reserved.length) {
+		checks.push({
+			level: "warn",
+			label: "project env",
+			detail: `${reserved.join(", ")} belongs to the driver and will be ignored — the loop sets it for every child itself`,
+		});
+	}
+
+	const missing = names.filter((name) => config.env[name].startsWith("/") && !exists(config.env[name]));
+	if (missing.length) {
+		checks.push({
+			level: "warn",
+			label: "project env",
+			detail: `${missing.map((name) => `${name}=${config.env[name]}`).join(", ")} — absolute path that does not exist`,
+		});
+	}
+
+	return checks;
+}
+
 export async function diagnose(options: DoctorOptions): Promise<Check[]> {
 	const { cwd, config, store } = options;
 	const checks: Check[] = [];
@@ -513,6 +556,8 @@ export async function diagnose(options: DoctorOptions): Promise<Check[]> {
 					detail: "no test_command or build_command — the verifier has to judge everything on the diff alone",
 				},
 	);
+
+	checks.push(...envChecks(config));
 
 	checks.push(...auditQueue(store));
 

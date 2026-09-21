@@ -11,9 +11,11 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+	childEnv,
 	DEFAULT_CONFIG_FILE,
 	inheritsWorker,
 	loadConfig,
+	reservedEnv,
 	splitModelRef,
 	withWorkerOverride,
 	type Config,
@@ -157,6 +159,7 @@ async function evidenceFor(env: Env) {
 		maxDiffBytes: env.config.verify.max_diff_bytes,
 		exclude: queueExcludes(env),
 		evidenceFile: env.evidenceFile,
+		env: childEnv(env.config),
 	});
 }
 
@@ -692,7 +695,7 @@ function runPi(env: Env, prompt: string, dryRun: boolean, budgetMs = 0): Promise
 		const child = spawn("pi", args, {
 			cwd: env.cwd,
 			stdio: ["ignore", "pipe", "inherit"],
-			env: { ...process.env, TODOLOOP_DRIVER: "shell", TODOLOOP_EVIDENCE_FILE: env.evidenceFile },
+			env: childEnv(env.config, { TODOLOOP_DRIVER: "shell", TODOLOOP_EVIDENCE_FILE: env.evidenceFile }),
 		});
 		const monitor = new SessionMonitor({ onLine: (line) => process.stdout.write(`${line}\n`) });
 		// setEncoding, not chunk.toString(): a chunk boundary can fall inside a
@@ -766,12 +769,24 @@ async function timedRun(env: Env, flags: Flags, dryRun: boolean, maxIterations: 
 		if (!dryRun) env.store = loadStore(env.storeFile);
 	};
 
+	// Say what the sessions inherit. A run whose tooling looks in the wrong
+	// place is diagnosed from this log hours later, and "which environment was
+	// that started with" is otherwise unanswerable — the shell that launched it
+	// is long gone. Names only: the values are in the file, and a log gets
+	// pasted places a token should not go.
+	const declaredEnv = Object.keys(env.config.env);
+	if (declaredEnv.length) console.log(`[todo-loop] env: ${declaredEnv.join(", ")} (from ${DEFAULT_CONFIG_FILE})`);
+	const ignoredEnv = reservedEnv(env.config);
+	if (ignoredEnv.length) {
+		console.error(`[todo-loop] ignoring ${ignoredEnv.join(", ")} from [env]: the driver sets it for every child itself`);
+	}
+
 	// [project].setup_command: infrastructure the workers should find already
 	// present — an emulator booted, a container warmed — paid for once here
 	// instead of once per session by a model that cannot afford it. Failing to
 	// set up is failing the run: every task after it would inherit the gap.
 	if (!dryRun && env.config.project.setup_command) {
-		const setup = await runCommand(env.cwd, env.config.project.setup_command, 0, 16 * 1024);
+		const setup = await runCommand(env.cwd, env.config.project.setup_command, 0, 16 * 1024, childEnv(env.config));
 		if (!setup.ok) {
 			console.error(`setup_command failed (exit ${setup.code}):\n${setup.output}`);
 			return EXIT_ERROR;
@@ -791,7 +806,7 @@ async function timedRun(env: Env, flags: Flags, dryRun: boolean, maxIterations: 
 		// failure is only reported. The kill-the-driver habit means orphaned
 		// infrastructure is the common case, not the odd one.
 		if (!dryRun && env.config.project.teardown_command) {
-			const teardown = await runCommand(env.cwd, env.config.project.teardown_command, 0, 16 * 1024);
+			const teardown = await runCommand(env.cwd, env.config.project.teardown_command, 0, 16 * 1024, childEnv(env.config));
 			if (!teardown.ok) console.error(`teardown_command failed (exit ${teardown.code}), continuing:\n${teardown.output}`);
 		}
 	}

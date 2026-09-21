@@ -466,3 +466,17 @@ test("the diff budget is still a cap, so a self-hosted verifier cannot be floode
 
 	fs.rmSync(path.join(repo, "HUGE.md"));
 });
+
+test("a command runs in the environment it was handed", async () => {
+	// The whole point of [env]: a project's build command sees what the project
+	// declared, not what the terminal that started the run happened to export.
+	const result = await runCommand(process.cwd(), "echo \"[$TODOLOOP_TEST_VAR]\"", 20000, 500, {
+		...process.env,
+		TODOLOOP_TEST_VAR: "applied",
+	});
+	assert.equal(result.ok, true);
+	assert.match(result.output, /\[applied\]/);
+
+	const without = await runCommand(process.cwd(), "echo \"[$TODOLOOP_TEST_VAR]\"", 20000, 500);
+	assert.match(without.output, /\[\]/, "and no environment argument leaves the process's own alone");
+});

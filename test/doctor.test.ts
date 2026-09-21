@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseConfig } from "../src/config.ts";
-import { auditQueue, formatChecks, modelChecks, type Check } from "../src/doctor.ts";
+import { auditQueue, envChecks, formatChecks, modelChecks, type Check } from "../src/doctor.ts";
 import { parseStore } from "../src/store.ts";
 
 function levelOf(checks: Check[], label: string): string | undefined {
@@ -264,4 +264,23 @@ test("what leaves the machine is disclosed once, naming every remote role", () =
 		piProviders: [],
 	});
 	assert.equal(levelOf(allLocal, "work leaves this machine"), undefined);
+});
+
+test("doctor says what the project env will and will not do", () => {
+	assert.deepEqual(envChecks(parseConfig("")), [], "no table, nothing to report — doctor is not a config dump");
+
+	const plain = envChecks(parseConfig('[env]\nPI_ANDROID_PROJECT = "/data/eq2"\n'), () => true);
+	assert.deepEqual(plain.map((check) => check.level), ["ok"]);
+	assert.match(plain[0].detail, /PI_ANDROID_PROJECT/);
+
+	const reserved = envChecks(parseConfig('[env]\nTODOLOOP_DRIVER = "session"\n'), () => true);
+	const warned = reserved.filter((check) => check.level === "warn");
+	assert.equal(warned.length, 1, "declaring a driver variable is silently ignored otherwise");
+	assert.match(warned[0].detail, /TODOLOOP_DRIVER/);
+
+	const stale = envChecks(parseConfig('[env]\nROOT = "/gone"\nLABEL = "release"\n'), (path) => path !== "/gone");
+	const missing = stale.filter((check) => check.level === "warn");
+	assert.equal(missing.length, 1);
+	assert.match(missing[0].detail, /ROOT=\/gone/);
+	assert.doesNotMatch(missing[0].detail, /LABEL/, "a value that is not a path is not a path that is missing");
 });

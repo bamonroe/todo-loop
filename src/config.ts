@@ -5,7 +5,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { parseToml } from "./toml.ts";
+import { isRaw, parseToml } from "./toml.ts";
 
 export interface Config {
 	models: {
@@ -129,6 +129,32 @@ export interface Config {
 		/** Run when the loop exits, success or not; its exit code is ignored. */
 		teardown_command: string;
 	};
+	/**
+	 * Environment variables every child process of the loop inherits: the
+	 * worker's pi session (and so every command the worker itself runs), the
+	 * build and test commands, setup and teardown.
+	 *
+	 * A project's tooling has to be told where the project is, and nothing else
+	 * in the loop is in a position to say it. The alternative is the one we had:
+	 * a path written into the tool, which is how a general tool quietly becomes
+	 * bespoke to one repository.
+	 *
+	 * It belongs in the file rather than in the shell that started the run. An
+	 * overnight run launched from a job runner has no interactive shell to have
+	 * exported anything, and a run that only works when started by hand from the
+	 * right terminal is not reproducible.
+	 *
+	 * Values are literal — nothing is expanded on the way in, so `$HOME` in a
+	 * value arrives as five characters. The commands themselves run under
+	 * `bash -lc` and can expand whatever they like there.
+	 *
+	 * `RESERVED_ENV` names cannot be set from here: they are how the driver
+	 * talks to its own extension, and a project that overwrote one would break
+	 * the loop in a way that looks like a model failure. Declaring one is kept
+	 * in the parsed config so `todo doctor` has something to point at, and
+	 * dropped by `childEnv` so it cannot take effect.
+	 */
+	env: Record<string, string>;
 	loop: {
 		max_iterations: number;
 		/**
@@ -358,6 +384,7 @@ export const DEFAULT_CONFIG: Config = {
 		setup_command: "",
 		teardown_command: "",
 	},
+	env: {},
 	loop: {
 		max_iterations: 50,
 		worker_timeout_ms: 0,
@@ -429,6 +456,28 @@ function pickStringArray(table: Plain, key: string, fallback: string[]): string[
 	return value.filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "");
 }
 
+/**
+ * The `[env]` table, rendered the way TOML wrote it.
+ *
+ * Faithful rather than clever: a number arrives as its digits and a boolean as
+ * "true" or "false", because those are the characters the person typed and
+ * guessing at an intended encoding ("1"? "yes"?) is how a config file starts
+ * meaning something other than what it says. Arrays and sub-tables are dropped
+ * — an environment variable is a string or it is nothing.
+ */
+function pickEnv(doc: Plain): Record<string, string> {
+	const table = section(doc, "env");
+	const out: Record<string, string> = {};
+	for (const [name, value] of Object.entries(table)) {
+		if (!name.trim()) continue;
+		if (typeof value === "string") out[name] = value;
+		else if (typeof value === "number" && Number.isFinite(value)) out[name] = String(value);
+		else if (typeof value === "boolean") out[name] = String(value);
+		else if (isRaw(value)) out[name] = value.token;
+	}
+	return out;
+}
+
 function section(doc: Plain, name: string): Plain {
 	const value = doc[name];
 	return value && typeof value === "object" && !Array.isArray(value) ? (value as Plain) : {};
@@ -489,6 +538,7 @@ export function parseConfig(text: string): Config {
 			setup_command: pickString(project, "setup_command", DEFAULT_CONFIG.project.setup_command),
 			teardown_command: pickString(project, "teardown_command", DEFAULT_CONFIG.project.teardown_command),
 		},
+		env: pickEnv(doc),
 		loop: {
 			max_iterations: pickNumber(loop, "max_iterations", DEFAULT_CONFIG.loop.max_iterations),
 			worker_timeout_ms: workerTimeout,
@@ -542,6 +592,40 @@ export function loadConfig(cwd: string, file?: string): Config {
 	const resolved = path.isAbsolute(target) ? target : path.join(cwd, target);
 	if (!fs.existsSync(resolved)) return DEFAULT_CONFIG;
 	return parseConfig(fs.readFileSync(resolved, "utf8"));
+}
+
+/**
+ * Variables the driver owns, which a project's `[env]` may not set.
+ *
+ * TODOLOOP_DRIVER tells the extension which side of the loop it is on; get it
+ * wrong and a session drives the loop it is running inside, committing every
+ * task twice. TODOLOOP_EVIDENCE_FILE is where a worker's tool results are
+ * recorded for the verifier. TODOLOOP_CONFIG decides which file this config
+ * came from, so a config that set it would be choosing its own successor.
+ */
+export const RESERVED_ENV = ["TODOLOOP_DRIVER", "TODOLOOP_EVIDENCE_FILE", "TODOLOOP_CONFIG"];
+
+/** Reserved names a project declared anyway — reported, never applied. */
+export function reservedEnv(config: Config): string[] {
+	return RESERVED_ENV.filter((name) => name in config.env);
+}
+
+/**
+ * The environment a child of the loop runs in: this process's, plus the
+ * project's declarations, plus whatever the caller is telling the child
+ * directly.
+ *
+ * Order is the whole contract. The project overrides the ambient shell, which
+ * is the point of declaring it in the file; the caller's overrides beat both,
+ * so the driver's own channel to its extension cannot be taken over even by
+ * accident.
+ */
+export function childEnv(config: Config, overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
+	const declared: Record<string, string> = {};
+	for (const [name, value] of Object.entries(config.env)) {
+		if (!RESERVED_ENV.includes(name)) declared[name] = value;
+	}
+	return { ...process.env, ...declared, ...overrides };
 }
 
 /** True when a model reference defers to pi's own configuration. */

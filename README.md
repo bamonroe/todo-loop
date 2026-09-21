@@ -577,6 +577,17 @@ matter most:
   both prompts, and on the planning side it is rendered *before* the look
   budget is spent — a planner that hears about an outline tool after it has
   already grepped has heard about it too late. Empty renders nothing.
+- `[env]` — variables every child of the loop inherits: the worker's pi session
+  (and so every command the worker itself runs), the build and test commands,
+  `setup_command` and `teardown_command`. This is how a project tells generic
+  tooling where it is, which is the alternative to the tooling hardcoding a
+  path and quietly becoming bespoke to one repository. It lives in the file
+  rather than in the shell that started the run, because an overnight run
+  launched from a job runner has no shell to have exported anything. Values are
+  literal — nothing is expanded on the way in. `TODOLOOP_DRIVER`,
+  `TODOLOOP_EVIDENCE_FILE` and `TODOLOOP_CONFIG` belong to the driver: setting
+  one is ignored, and `todo doctor` says so rather than leaving the file
+  looking like it took effect.
 - `atomic.max_files` / `atomic.on_overflow` — the bottom-level size budget and
   what to do when a task blows through it. See
   [Keeping the bottom level atomic](#keeping-the-bottom-level-atomic).

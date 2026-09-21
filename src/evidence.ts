@@ -291,13 +291,20 @@ export async function changedFiles(
 	return [...names];
 }
 
-export async function runCommand(cwd: string, command: string, timeoutMs: number, maxBytes: number): Promise<CommandRun> {
+export async function runCommand(
+	cwd: string,
+	command: string,
+	timeoutMs: number,
+	maxBytes: number,
+	env?: NodeJS.ProcessEnv,
+): Promise<CommandRun> {
 	if (!command.trim()) return { command, ok: true, code: 0, output: "(not configured)" };
 	try {
 		const { stdout, stderr } = await run("bash", ["-lc", command], {
 			cwd,
 			timeout: timeoutMs,
 			maxBuffer: 16 * 1024 * 1024,
+			env,
 		});
 		return { command, ok: true, code: 0, output: truncateTail(`${stdout}${stderr}`.trim() || "(no output)", maxBytes) };
 	} catch (error) {
@@ -347,6 +354,11 @@ export interface EvidenceOptions {
 	 * not an error — most tasks need none.
 	 */
 	evidenceFile?: string;
+	/**
+	 * The environment the build and test commands run in. Undefined inherits
+	 * this process's, which is what a caller with no project `[env]` wants.
+	 */
+	env?: NodeJS.ProcessEnv;
 }
 
 /**
@@ -414,7 +426,7 @@ export async function gatherEvidence(options: EvidenceOptions): Promise<Evidence
 		commands.push(
 			skip
 				? { command, ok: true, code: 0, output: "(not run: every changed file is documentation)" }
-				: await runCommand(options.cwd, command, options.timeoutMs, perPart),
+				: await runCommand(options.cwd, command, options.timeoutMs, perPart, options.env),
 		);
 	}
 

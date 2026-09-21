@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
 	applyWorkerOverride,
+	childEnv,
 	DEFAULT_CONFIG,
 	isLocalRef,
 	parseConfig,
+	reservedEnv,
 	splitModelRef,
 	withWorkerOverride,
 } from "../src/config.ts";
@@ -85,4 +87,52 @@ test("the plan section has defaults and reads overrides", () => {
 	assert.equal(tuned.max_children, 3);
 	assert.equal(tuned.research_budget, 0, "zero is a real setting: no research rounds at all");
 	assert.equal(tuned.memory_file, "docs/notes.md");
+});
+
+test("the env table is read as written", () => {
+	assert.deepEqual(parseConfig("").env, {}, "no table is no variables, not a default set");
+
+	const env = parseConfig(
+		['[env]', 'PI_ANDROID_PROJECT = "/data/eq2"', "PORT = 8080", "STRICT = true", 'EMPTY = ""'].join("\n"),
+	).env;
+	assert.equal(env.PI_ANDROID_PROJECT, "/data/eq2");
+	assert.equal(env.PORT, "8080", "a number arrives as its digits");
+	assert.equal(env.STRICT, "true", "a boolean is rendered, not interpreted — guessing at \"1\" would change what the file says");
+	assert.equal(env.EMPTY, "", "empty is a real value: it is how you unset something the ambient shell exported");
+});
+
+test("an env value with no environment representation is dropped rather than mangled", () => {
+	const env = parseConfig('[env]\nGOOD = "yes"\nLIST = ["a", "b"]\n').env;
+	assert.equal(env.GOOD, "yes");
+	assert.ok(!("LIST" in env), "an array is not a variable");
+});
+
+test("childEnv layers the ambient shell, the project and the caller in that order", () => {
+	const config = parseConfig('[env]\nTODOLOOP_TEST_ONE = "project"\nTODOLOOP_TEST_TWO = "project"\n');
+	process.env.TODOLOOP_TEST_ONE = "ambient";
+	process.env.TODOLOOP_TEST_THREE = "ambient";
+	try {
+		const result = childEnv(config, { TODOLOOP_TEST_TWO: "caller" });
+		assert.equal(result.TODOLOOP_TEST_ONE, "project", "the file beats the shell — that is the point of declaring it");
+		assert.equal(result.TODOLOOP_TEST_TWO, "caller", "the caller beats the file");
+		assert.equal(result.TODOLOOP_TEST_THREE, "ambient", "and everything else is inherited");
+	} finally {
+		delete process.env.TODOLOOP_TEST_ONE;
+		delete process.env.TODOLOOP_TEST_THREE;
+	}
+});
+
+test("a project cannot set the driver's own variables, even the ones no caller overrides", () => {
+	// TODOLOOP_CONFIG is the dangerous one: nothing passes it at a spawn site,
+	// so layering order alone would let a project choose which config file its
+	// own children read.
+	const config = parseConfig(
+		['[env]', 'TODOLOOP_DRIVER = "session"', 'TODOLOOP_CONFIG = "other.toml"', 'KEPT = "yes"'].join("\n"),
+	);
+	assert.deepEqual(reservedEnv(config), ["TODOLOOP_DRIVER", "TODOLOOP_CONFIG"], "reported so doctor can say so");
+
+	const result = childEnv(config, { TODOLOOP_DRIVER: "shell" });
+	assert.equal(result.TODOLOOP_DRIVER, "shell");
+	assert.equal(result.TODOLOOP_CONFIG, undefined, "dropped, not merely outranked");
+	assert.equal(result.KEPT, "yes", "and the rest of the table still applies");
 });

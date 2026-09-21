@@ -115,6 +115,26 @@ max_files = 5
 # ordinary; three on an oversized task is the signal.
 on_overflow = "warn"
 
+# Variables every child of the loop inherits: the worker's pi session (and so
+# every command the worker itself runs), the build and test commands, setup and
+# teardown.
+#
+# This is how a project tells generic tooling where it is. A tool that has to
+# hardcode a path in order to work here is a tool that only works here.
+#
+# Declared in the file rather than exported by a shell, because an overnight run
+# started from a job runner has no shell, and a run that only works when started
+# by hand from the right terminal is not reproducible.
+#
+# Values are literal — nothing is expanded on the way in, so "$HOME/src" arrives
+# with the dollar sign intact. The commands run under `bash -lc` and can expand
+# whatever they like there.
+#
+# TODOLOOP_DRIVER, TODOLOOP_EVIDENCE_FILE and TODOLOOP_CONFIG belong to the
+# driver. Setting one here is ignored, and `todo doctor` says so.
+# [env]
+# PI_ANDROID_PROJECT = "/srv/myapp"
+
 [context]
 # Start eliding old tool results once context passes this fraction of the
 # window. One big edit at a threshold beats trimming every turn: rewriting the
