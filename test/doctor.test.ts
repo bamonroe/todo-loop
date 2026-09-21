@@ -278,7 +278,12 @@ test("doctor says what the project env will and will not do", () => {
 	assert.equal(warned.length, 1, "declaring a driver variable is silently ignored otherwise");
 	assert.match(warned[0].detail, /TODOLOOP_DRIVER/);
 
-	const stale = envChecks(parseConfig('[env]\nROOT = "/gone"\nLABEL = "release"\n'), (path) => path !== "/gone");
+	// The fake says only absolute paths exist, so the guard that stops a plain
+	// value like "release" being checked as a path has to be doing real work.
+	const stale = envChecks(
+		parseConfig('[env]\nROOT = "/gone"\nLABEL = "release"\n'),
+		(path) => path.startsWith("/") && path !== "/gone",
+	);
 	const missing = stale.filter((check) => check.level === "warn");
 	assert.equal(missing.length, 1);
 	assert.match(missing[0].detail, /ROOT=\/gone/);

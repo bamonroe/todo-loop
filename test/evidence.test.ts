@@ -480,3 +480,24 @@ test("a command runs in the environment it was handed", async () => {
 	const without = await runCommand(process.cwd(), "echo \"[$TODOLOOP_TEST_VAR]\"", 20000, 500);
 	assert.match(without.output, /\[\]/, "and no environment argument leaves the process's own alone");
 });
+
+test("the build and test commands run in the environment the caller declared", async () => {
+	// The [env] table exists to point a project's tooling at the project, and
+	// the verifier's commands are the half of the loop most likely to need it:
+	// a build script that cannot find the project fails every task for a reason
+	// that has nothing to do with the task.
+	const evidence = await gatherEvidence({
+		cwd: repo,
+		baseCommit: base,
+		testCommand: "",
+		buildCommand: "echo \"[$TODOLOOP_TEST_VAR]\"",
+		requireTestsPass: false,
+		timeoutMs: 20000,
+		maxBytes: 12000,
+		maxDiffBytes: 48000,
+		env: { ...process.env, TODOLOOP_TEST_VAR: "declared" },
+	});
+	const build = evidence.commands.find((command) => command.command.includes("TODOLOOP_TEST_VAR"));
+	assert.ok(build, "the build command ran");
+	assert.match(build.output, /\[declared\]/);
+});
