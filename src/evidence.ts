@@ -262,6 +262,43 @@ export interface EvidenceOptions {
 }
 
 /**
+ * Files a build cannot be broken by, and cannot be fixed by either.
+ *
+ * Conservative on purpose: an extension that is not on this list counts as
+ * code, so an unfamiliar file makes the build run. The failure this guards
+ * against is skipping a check that mattered; running one that did not is only
+ * slow.
+ */
+const DOC_EXTENSIONS = [".md", ".markdown", ".rst", ".txt", ".adoc"];
+
+/**
+ * Whether a task's whole diff is documentation.
+ *
+ * Earned by run 11, which halted on this in twenty minutes. A planning round
+ * put a documentation act first — write the acceptance criteria into NOTES.md,
+ * change nothing else — and the act did exactly that. Verification then ran the
+ * build, as it does for every task, and the project had no Gradle scaffold yet
+ * because that was the *next* item. Exit 2, rejected, for a failure the task
+ * could not have caused and could not have prevented. The retry drew the only
+ * conclusion available to it and scaffolded the entire project inside the
+ * documentation task, which the verifier then rejected for touching twelve
+ * files — and failed-and-oversized is exactly the precondition for promote, so
+ * a one-file note became a plan waiting to be broken down.
+ *
+ * Judged on the diff rather than on the act's declared `kind`: a docs act that
+ * did touch code still gets built, which is the loophole a kind-based test
+ * would have opened, and it costs nothing to be right about a code act that
+ * happened to change only a README.
+ *
+ * An empty diff is not documentation. Nothing changed is its own failure and
+ * belongs to the caller, not here.
+ */
+export function documentationOnly(files: string[]): boolean {
+	if (!files.length) return false;
+	return files.every((file) => DOC_EXTENSIONS.some((ext) => file.toLowerCase().endsWith(ext)));
+}
+
+/**
  * Let tools answer the mechanical questions. If the build or tests fail there
  * is nothing for a model to judge, so we short-circuit before spending a call.
  */
@@ -274,10 +311,18 @@ export async function gatherEvidence(options: EvidenceOptions): Promise<Evidence
 		options.exclude ?? DEFAULT_EXCLUDES,
 	);
 
+	// Reported as not run rather than quietly omitted: the verifier is told what
+	// was checked, and "documentation only" is a fact about the task it should
+	// weigh, not a gap it has to infer from a missing section.
+	const skip = documentationOnly(files);
 	const commands: CommandRun[] = [];
 	for (const command of [options.buildCommand, options.testCommand]) {
 		if (!command.trim()) continue;
-		commands.push(await runCommand(options.cwd, command, options.timeoutMs, perPart));
+		commands.push(
+			skip
+				? { command, ok: true, code: 0, output: "(not run: every changed file is documentation)" }
+				: await runCommand(options.cwd, command, options.timeoutMs, perPart),
+		);
 	}
 
 	const failed = commands.find((entry) => !entry.ok);

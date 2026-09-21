@@ -230,7 +230,11 @@ in `.pi/extensions/`.
 1. The worker calls `todo_complete` with a one-line summary.
 2. Tooling answers the mechanical questions first — the build and test commands
    from `todoloop.toml` run, and a failure short-circuits before any model call.
-   An empty diff is also a hard failure.
+   An empty diff is also a hard failure. They are skipped, and reported as
+   skipped, when every file in the diff is documentation: a task that edited
+   only NOTES.md can neither break a build nor fix one, and failing it for a
+   build that was already broken — or that has no project to run against yet —
+   rejects work that was correct.
 3. The verifier model gets the task text, the changed files, the diff, and the
    command output. `todo.toml` and `todoloop.toml` are excluded from that diff —
    the loop's own bookkeeping changes on every task, and showing it to the

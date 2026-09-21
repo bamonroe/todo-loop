@@ -295,3 +295,68 @@ test("revert refuses when something committed behind the loop's back", async () 
 test("revert with no base commit is a no-op", async () => {
 	assert.equal(await revertTo(repo, ""), false);
 });
+
+test("a documentation-only diff does not run the build or the tests", async () => {
+	await commitAll(repo, "todo(x): settle the tree");
+	const now = await headCommit(repo);
+	fs.writeFileSync(path.join(repo, "NOTES.md"), "# Project notes\n\nAcceptance: the build is green.\n");
+
+	// Commands that fail loudly: if they run at all, this task is rejected —
+	// which is exactly what run 11 did to an act that only wrote NOTES.md.
+	const evidence = await gatherEvidence({
+		cwd: repo,
+		baseCommit: now,
+		buildCommand: "exit 9",
+		testCommand: "exit 9",
+		requireTestsPass: true,
+		timeoutMs: 10000,
+		maxBytes: 12000,
+	});
+
+	assert.equal(evidence.hardFailure, undefined);
+	assert.deepEqual(evidence.files, ["NOTES.md"]);
+	// Named in the evidence, not silently missing.
+	assert.equal(evidence.commands.length, 2);
+	for (const command of evidence.commands) {
+		assert.equal(command.ok, true);
+		assert.match(command.output, /not run/);
+	}
+});
+
+test("one code file in the diff is enough to run them again", async () => {
+	await commitAll(repo, "todo(x): keep the notes");
+	const now = await headCommit(repo);
+	fs.appendFileSync(path.join(repo, "NOTES.md"), "\nAnd a second line.\n");
+	fs.appendFileSync(path.join(repo, "server.ts"), "export const tls = false;\n");
+
+	const evidence = await gatherEvidence({
+		cwd: repo,
+		baseCommit: now,
+		buildCommand: "exit 9",
+		testCommand: "",
+		requireTestsPass: true,
+		timeoutMs: 10000,
+		maxBytes: 12000,
+	});
+
+	assert.deepEqual(evidence.files.sort(), ["NOTES.md", "server.ts"]);
+	assert.match(evidence.hardFailure ?? "", /exit 9/);
+});
+
+test("an empty diff is not documentation-only, so the commands still run", async () => {
+	await commitAll(repo, "todo(x): land the code too");
+	const now = await headCommit(repo);
+
+	const evidence = await gatherEvidence({
+		cwd: repo,
+		baseCommit: now,
+		buildCommand: "exit 9",
+		testCommand: "",
+		requireTestsPass: true,
+		timeoutMs: 10000,
+		maxBytes: 12000,
+	});
+
+	// The command failure is what surfaces, which can only happen if it ran.
+	assert.match(evidence.hardFailure ?? "", /exit 9/);
+});

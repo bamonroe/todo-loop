@@ -143,6 +143,38 @@ Reset to the `16b8e14` baseline, no wall-clock cap. Planned five items, then:
 This is the first run where a task closed and the loop advanced to the next one
 on its own.
 
+## Run 11: the mechanical gate did not know what it was judging
+
+Twenty minutes, one commit, halted by a documentation task.
+
+Round one planned a docs act first — write the acceptance criteria into
+NOTES.md, change nothing else. The act did exactly that. Verification then ran
+`build_command`, as it does for every task, and the Android CLI answered "no
+Android project at or above /data/eq2": the scaffold was the *next* item. Exit
+2, rejected, for a failure the task could not have caused.
+
+The retry drew the only conclusion available to it and scaffolded the whole
+project inside the documentation task. The build passed; the verifier then
+rejected it — correctly — for touching twelve files against a task that said
+only NOTES.md may change. Failed *and* oversized is the precondition for
+`on_overflow = "promote"`, so the loop converted a one-file note into a plan and
+opened iteration 4 by asking what to break it down into.
+
+One wrong gate, three wasted sessions and a corrupted queue row. Run 10 never
+saw it by luck: its first planned item was the scaffold, so everything after had
+a project to build. The notes tripwire makes a docs act first much more likely.
+
+Fixed by judging the *diff*, not the act's declared `kind`: if every changed
+file is documentation the commands are skipped and the evidence says so. Kind
+would have opened a loophole — a docs act that touched code would skip the
+build — and the diff closes it. Three tests, each mutation-checked.
+
+Two things did work, and this is the run that showed it. Thinking retention is
+live: one turn emitted 4,948 output tokens and the next turn's input rose by
+4,986 — a ratio of ~1.0 where run 10's equivalent turn moved 217 tokens against
+4,082. And `promote` fired for the first time in any run. It fired on poisoned
+input, but the mechanism works.
+
 ## Still open
 
 - **The project description contradicts Android.** It says the app adjusts
