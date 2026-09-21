@@ -361,6 +361,20 @@ test("a killed attempt's reasoning goes to the sidecar, not the project's queue"
 	assert.equal(findTask(loadStore(file), "lock")?.interrupted_thinking, "was part way through the boolean op");
 });
 
+test("the carried-tree marker survives the sidecar, not just the native file", () => {
+	// Under a project schema the whole loop table lives in the sidecar, and its
+	// reader is separate code from the native one — a marker the loop writes and
+	// cannot read back would silently revert to discarding a timed-out tree.
+	const dir = scratch();
+	const file = path.join(dir, "TASKS.toml");
+	fs.writeFileSync(file, GATED);
+	fs.writeFileSync(path.join(dir, "FINISHED.toml"), FINISHED);
+	const onDisk = loadStore(file);
+	onDisk.loop.carried = "lock";
+	saveStore(file, onDisk);
+	assert.equal(loadStore(file).loop.carried, "lock");
+});
+
 test("blocking a task writes the reason the project's validator insists on", () => {
 	const store = parseStore(GATED, { archiveText: "", archiveFile: "FINISHED.toml" });
 	markBlocked(store, findTask(store, "lock") as Task, "OpenCASCADE will not build in the container");

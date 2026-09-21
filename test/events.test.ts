@@ -243,3 +243,18 @@ test("a message_update that carries no thinking delta is not parsed into thinkin
 	m.feed(event({ type: "message_update", usage: {}, assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "hello" } }));
 	assert.equal(m.thinking, "");
 });
+
+test("a text delta that merely mentions thinking_delta is not read as thinking", () => {
+	// The cheap line-level test is a filter, not the decision. A worker editing
+	// this very monitor writes the string "thinking_delta" into ordinary output,
+	// and that must not become the reasoning its retry inherits.
+	const { m } = monitor();
+	m.feed(
+		event({
+			type: "message_update",
+			usage: {},
+			assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: 'we parse "thinking_delta" here' },
+		}),
+	);
+	assert.equal(m.thinking, "");
+});
