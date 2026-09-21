@@ -607,6 +607,13 @@ test("a killed act keeps its file, and the next attempt starts on it", async () 
 	assert.match(stderr, /kept the working tree/);
 	assert.match(stderr, /carrying forward sliders/);
 	assert.doesNotMatch(stderr, /refusing to start a task/, "the clean-tree gate let the task's own mess through");
+	// A timed-out act is rejected on the clock without a verifier ever being
+	// called, so the closing line names the worker's time and no verify phase.
+	// Reporting "verify 0.0s" would read as a verifier that answered instantly.
+	assert.match(stderr, /rejected \(attempt 1\/\d+\) after [\d.]+m?s? ?\(worker [\d.]+m?s\):/);
+	assert.doesNotMatch(stderr, /\(worker [^)]*verify/, "a killed act reported a verify phase it never reached");
+	// Every line the run prints carries the time it printed.
+	assert.match(stderr, /^\[\d\d:\d\d:\d\d\] .*kept the working tree/m);
 });
 
 test("the retry is handed the tree and the thoughts of the attempt before it", async () => {

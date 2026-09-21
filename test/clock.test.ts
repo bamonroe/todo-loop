@@ -9,6 +9,10 @@ test("a duration is read without counting digits, at every scale", () => {
 	assert.equal(formatDuration(4200), "4.2s");
 	assert.equal(formatDuration(12_000), "12s");
 	assert.equal(formatDuration(72_400), "72s");
+	// Just past 90s is the first minute reading; without a case here, widening
+	// the seconds branch to a quarter of an hour goes unnoticed.
+	assert.equal(formatDuration(95_000), "1m35s");
+	assert.equal(formatDuration(600_000), "10m00s");
 	// Past 90s the minute is the unit a human thinks in.
 	assert.equal(formatDuration(1_872_000), "31m12s");
 	assert.equal(formatDuration(1_800_000), "30m00s");
@@ -48,6 +52,9 @@ test("stamping wraps both streams and hands back the console it found", () => {
 
 	undo();
 	console.log("after the undo");
+	// Both streams were patched, so both have to be handed back — a run that
+	// restores only stdout leaves every later stderr line stamped.
+	console.error("stderr after the undo");
 	const captured = lines.slice();
 	console.log = realLog;
 	console.error = realError;
@@ -58,5 +65,6 @@ test("stamping wraps both streams and hands back the console it found", () => {
 		"",
 		"\n[14:07:31] === [6/50] code — eq.thing ===",
 		"after the undo",
+		"stderr after the undo",
 	]);
 });
