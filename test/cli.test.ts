@@ -399,8 +399,20 @@ test("project packages isolate the worker's extensions", () => {
 
 test("the project section parses and filters junk", () => {
 	const config = parseConfig('[project]\npackages = ["a", 3, ""]\nsetup_command = "boot-emulator"\nteardown_command = "kill-emulator"\n');
-	assert.deepEqual(config.project, { packages: ["a"], setup_command: "boot-emulator", teardown_command: "kill-emulator" });
-	assert.deepEqual(parseConfig("").project, { packages: [], setup_command: "", teardown_command: "" });
+	assert.deepEqual(config.project, {
+		packages: ["a"],
+		worker_tools: "",
+		setup_command: "boot-emulator",
+		teardown_command: "kill-emulator",
+	});
+	assert.deepEqual(parseConfig("").project, { packages: [], worker_tools: "", setup_command: "", teardown_command: "" });
+});
+
+test("worker_tools survives the round trip from the file to the prompt options", () => {
+	// A multi-line string is the expected shape here — it is a block of guidance,
+	// not a command — so the parse has to keep the newlines it was given.
+	const config = parseConfig('[project]\nworker_tools = """Use treesitter_outline.\nNever rewrite a whole file."""\n');
+	assert.equal(config.project.worker_tools, "Use treesitter_outline.\nNever rewrite a whole file.");
 });
 
 /**

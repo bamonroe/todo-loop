@@ -56,6 +56,8 @@ export interface PromptOptions {
 	buildCommand?: string;
 	workerCheck?: string;
 	testCommand?: string;
+	/** How this project's code is read and changed — its tools, in its own words. */
+	workerTools?: string;
 }
 
 /**
@@ -287,6 +289,11 @@ export function renderPlanPrompt(store: Store, task: Task, options: PromptOption
 		].join("\n"),
 	);
 
+	// Directly after the look budget is named, and before anything is spent: a
+	// planner told about an outline tool only at the end has already grepped.
+	const planTools = toolingBlock(options.workerTools);
+	if (planTools) parts.push(planTools);
+
 	parts.push(
 		[
 			"## What you may add",
@@ -381,6 +388,27 @@ function siblingTitles(store: Store, task: Task): string[] {
  * a failure is the compiler error alone.
  */
 /**
+ * How to read and change code here.
+ *
+ * The counterpart to `worker_check`, and the same argument: a generic prompt
+ * cannot name a project's tools, so it renders the project's own text or
+ * nothing at all. Rendered ahead of the work in both prompts, because it
+ * governs the first thing a session does rather than the last — a planner that
+ * learns about an outline tool after it has spent its look budget reading files
+ * has learnt it too late.
+ *
+ * Nothing generic is appended. `worker_check` can add "you cannot compile in
+ * your head" because that is true of every project; there is no equivalent
+ * sentence about reading that is worth the tokens where a project has no
+ * tooling to point at.
+ */
+function toolingBlock(guidance?: string): string | undefined {
+	const text = guidance?.trim();
+	if (!text) return undefined;
+	return ["## How to read and change code here", text].join("\n");
+}
+
+/**
  * Tell the worker to check its work — without telling it how, where the
  * project already has something better.
  *
@@ -455,6 +483,9 @@ export function renderActPrompt(store: Store, task: Task, options: PromptOptions
 			].join("\n"),
 		);
 	}
+
+	const actTools = toolingBlock(options.workerTools);
+	if (actTools) parts.push(actTools);
 
 	parts.push(
 		[

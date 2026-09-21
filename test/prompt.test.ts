@@ -390,6 +390,45 @@ test("with no worker_check the commands are still named", () => {
 	assert.match(prompt, /make test/);
 });
 
+// ------------------------------------------------- worker_tools
+
+test("worker_tools reaches both prompts, in the project's own words", () => {
+	// The counterpart to worker_check: the generic prompt cannot name a
+	// project's tools, so it renders the project's text or nothing.
+	const guidance = "Read with treesitter_outline. Never rewrite a whole file.";
+	const acted = renderActPrompt(store, task, { mode: "tool", workerTools: guidance });
+	const planned = renderAssignmentPrompt(plan, plan.tasks[0], { ...PLAN_OPTS, workerTools: guidance });
+
+	for (const prompt of [acted, planned]) {
+		assert.match(prompt, /## How to read and change code here/);
+		assert.match(prompt, /Read with treesitter_outline\. Never rewrite a whole file\./);
+	}
+});
+
+test("a planner is told how to look before it has spent its look budget", () => {
+	// Ordering is the whole point on the plan side. A planner that learns about
+	// an outline tool after it has already grepped has learnt it too late.
+	const prompt = renderAssignmentPrompt(plan, plan.tasks[0], {
+		...PLAN_OPTS,
+		lookBudget: 6,
+		workerTools: "Use treesitter_outline.",
+	});
+	const look = prompt.indexOf("commands for this");
+	const tools = prompt.indexOf("## How to read and change code here");
+	const add = prompt.indexOf("## What you may add");
+	assert.ok(look >= 0 && tools >= 0 && add >= 0);
+	assert.ok(tools > look, "the tooling block follows the look budget it applies to");
+	assert.ok(tools < add, "and precedes the round's own instructions");
+});
+
+test("no worker_tools means no block about one", () => {
+	// A project with no tooling of its own already has read/write/bash habits;
+	// repeating them back would cost tokens for nothing.
+	for (const options of [{ mode: "tool" as const }, { ...PLAN_OPTS }, { mode: "tool" as const, workerTools: "   " }]) {
+		assert.doesNotMatch(renderActPrompt(store, task, options), /How to read and change code here/);
+	}
+});
+
 // ------------------------------------------------- the unattended-run rule
 
 test("both prompts say the run is unattended and offer a recorded substitution", () => {

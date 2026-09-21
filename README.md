@@ -523,6 +523,15 @@ matter most:
   tooling has to go on. Either way the rule is the same and is the part that
   matters: you cannot compile in your head, and do not finish on a failing
   build.
+- `project.worker_tools` — how the worker is told to *read and change* code,
+  as against `verify.worker_check`, which is how it is told to check the
+  result. Same argument: nothing generic can name a project's tools, and a
+  project whose `project.packages` include a structural editor wants the
+  opposite advice from one with nothing but `read`, so the text is the
+  project's own and the prompt only puts a heading on it. It is rendered into
+  both prompts, and on the planning side it is rendered *before* the look
+  budget is spent — a planner that hears about an outline tool after it has
+  already grepped has heard about it too late. Empty renders nothing.
 - `atomic.max_files` / `atomic.on_overflow` — the bottom-level size budget and
   what to do when a task blows through it. See
   [Keeping the bottom level atomic](#keeping-the-bottom-level-atomic).

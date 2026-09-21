@@ -371,6 +371,7 @@ export default function (pi: ExtensionAPI) {
 			memoryFile: config.plan.memory_file,
 			buildCommand: config.verify.build_command,
 			workerCheck: config.verify.worker_check,
+			workerTools: config.project.worker_tools,
 			testCommand: config.verify.test_command,
 		});
 

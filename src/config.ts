@@ -106,6 +106,20 @@ export interface Config {
 		 */
 		packages: string[];
 		/**
+		 * How the worker is told to read and change code in this project.
+		 *
+		 * `verify.worker_check` names the tools that judge the work; this names
+		 * the tools that do it. Nothing generic can fill it in — a project whose
+		 * packages include a structural editor and one with nothing but `read`
+		 * want opposite advice — so the text belongs to the project and the
+		 * prompt only frames it.
+		 *
+		 * Empty is the honest default: with no tooling of its own, a worker's
+		 * `read`/`write`/`bash` habits are the only ones available and repeating
+		 * them back costs tokens for nothing.
+		 */
+		worker_tools: string;
+		/**
 		 * Run by the driver before the first task; a non-zero exit stops the run
 		 * before any task starts. For infrastructure a worker should find already
 		 * present — an emulator booted, a container warmed — instead of spending
@@ -340,6 +354,7 @@ export const DEFAULT_CONFIG: Config = {
 	},
 	project: {
 		packages: [],
+		worker_tools: "",
 		setup_command: "",
 		teardown_command: "",
 	},
@@ -470,6 +485,7 @@ export function parseConfig(text: string): Config {
 		},
 		project: {
 			packages: pickStringArray(project, "packages", DEFAULT_CONFIG.project.packages),
+			worker_tools: pickString(project, "worker_tools", DEFAULT_CONFIG.project.worker_tools),
 			setup_command: pickString(project, "setup_command", DEFAULT_CONFIG.project.setup_command),
 			teardown_command: pickString(project, "teardown_command", DEFAULT_CONFIG.project.teardown_command),
 		},

@@ -365,6 +365,7 @@ function commandNext(env: Env, flags: Flags): number {
 			memoryFile: env.config.plan.memory_file,
 			buildCommand: env.config.verify.build_command,
 			workerCheck: env.config.verify.worker_check,
+			workerTools: env.config.project.worker_tools,
 			testCommand: env.config.verify.test_command,
 		}),
 	);
@@ -798,6 +799,7 @@ async function runLoop(
 			memoryFile: env.config.plan.memory_file,
 			buildCommand: env.config.verify.build_command,
 			workerCheck: env.config.verify.worker_check,
+			workerTools: env.config.project.worker_tools,
 			testCommand: env.config.verify.test_command,
 		});
 
