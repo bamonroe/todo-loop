@@ -175,11 +175,21 @@ test("the worker is launched with project-local files trusted", () => {
 	// threshold, so losing it is a loop that compacts forever.
 	const inherited = workerArgs({ ...DEFAULT_CONFIG, models: { ...DEFAULT_CONFIG.models, worker: "inherit" } }, "p");
 	assert.ok(inherited.args.includes("--approve"));
-	assert.deepEqual(inherited.args, ["-p", "--approve", "--", "p"]);
+	assert.deepEqual(inherited.args, ["-p", "--approve", "--mode", "json", "--", "p"]);
 
 	const pinned = workerArgs(parseConfig('[models]\nworker = "ollama/qwen3.8-27b"\n'), "p");
-	assert.deepEqual(pinned.args, ["-p", "--approve", "--provider", "ollama", "--model", "qwen3.8-27b", "--", "p"]);
+	assert.deepEqual(pinned.args, ["-p", "--approve", "--mode", "json", "--provider", "ollama", "--model", "qwen3.8-27b", "--", "p"]);
 	assert.equal(pinned.model, "ollama/qwen3.8-27b");
+});
+
+test("the worker is launched in JSON mode, whichever model it uses", () => {
+	// Text mode printed the final message and nothing else, which is why run 13
+	// could report that ten sessions overran but not what any of them did.
+	for (const config of [DEFAULT_CONFIG, parseConfig('[models]\nworker = "ollama/qwen3.8-27b"\n')]) {
+		const { args } = workerArgs(config, "p");
+		assert.equal(args[args.indexOf("--mode") + 1], "json");
+		assert.ok(args.indexOf("--mode") < args.indexOf("--"), "before the prompt separator, like every other flag");
+	}
 });
 
 test("the prompt stays behind the -- separator, whatever it starts with", () => {
@@ -201,7 +211,7 @@ test("the prompt stays behind the -- separator, whatever it starts with", () => 
 async function planningRound(
 	script: string,
 	options: { loop?: string; extraTasks?: string; atomic?: string; verify?: string } = {},
-): Promise<{ store: ReturnType<typeof loadStore>; stderr: string }> {
+): Promise<{ store: ReturnType<typeof loadStore>; stdout: string; stderr: string }> {
 	const repo = fs.mkdtempSync(path.join(os.tmpdir(), "todo-loop-round-"));
 	const bin = path.join(repo, "bin");
 	fs.mkdirSync(bin);
@@ -222,8 +232,86 @@ async function planningRound(
 		{ cwd: repo, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } },
 	).catch((error: { stdout?: string; stderr?: string }) => error);
 
-	return { store: loadStore(path.join(repo, "todo.toml")), stderr: result.stderr ?? "" };
+	return { store: loadStore(path.join(repo, "todo.toml")), stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
+
+/** The lines a real pi emits in `--mode json`, for a fake one to echo. */
+function jsonSession(...events: unknown[]): string {
+	const lines = [{ type: "session", version: 3, id: "fake", timestamp: "now", cwd: "." }, { type: "agent_start" }, { type: "turn_start" }, ...events, { type: "agent_end" }]
+		.map((event) => JSON.stringify(event))
+		.join("\n");
+	return `cat <<'PIJSON'\n${lines}\nPIJSON`;
+}
+
+test("the driver reads a JSON session, and logs what it cost", async () => {
+	const { store, stdout, stderr } = await planningRound(
+		jsonSession(
+			{ type: "tool_execution_start", toolCallId: "a", toolName: "bash", args: { command: "./gradlew assembleDebug" } },
+			{ type: "tool_execution_end", toolCallId: "a", toolName: "bash", isError: false, result: "BUILD SUCCESSFUL" },
+			{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Wired the screen to the engine." }], usage: { input: 31_000, output: 900 } } },
+		),
+		{
+			extraTasks: `\n[[task]]\nid = "eq.wire"\ntitle = "Wire the screen to the engine"\nparent = "eq"\nlevel = "act"\nkind = "code"\nstatus = "todo"\nattempts = 0\n`,
+		},
+	);
+
+	// Run 13 recorded nothing but "exceeded its budget" for ten killed sessions.
+	// An ordinary session's cost is what makes an overrun legible at all.
+	assert.match(stdout, /\[todo-loop\] session: 1 tool call \(bash×1\), 1 turn, 31k context \/ 900 out/);
+	assert.match(stdout, /→ bash \.\/gradlew assembleDebug/, "the tool calls stream as they happen");
+	assert.doesNotMatch(stdout, /"type":"tool_execution_start"/, "and the raw events do not");
+	assert.notEqual(store.tasks.find((t) => t.id === "eq.wire")?.status, "blocked");
+	assert.doesNotMatch(stderr, /blocked by the worker/);
+});
+
+test("BLOCKED counts when the worker says it, not when a tool result contains it", async () => {
+	// Text mode handed the whole stream to the regex, so a grep hit or a diff
+	// line was indistinguishable from a refusal — and a false positive halts the
+	// entire run, not just the task.
+	const { store, stderr } = await planningRound(
+		jsonSession(
+			{ type: "tool_execution_start", toolCallId: "a", toolName: "bash", args: { command: "grep -rn BLOCKED ." } },
+			{ type: "tool_execution_end", toolCallId: "a", toolName: "bash", isError: false, result: "NOTES.md:9:BLOCKED: an old note about a task we finished" },
+			{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Nothing to change; the note is stale." }] } },
+		),
+		{ extraTasks: `\n[[task]]\nid = "eq.wire"\ntitle = "Wire the screen"\nparent = "eq"\nlevel = "act"\nkind = "code"\nstatus = "todo"\nattempts = 0\n` },
+	);
+
+	assert.notEqual(store.tasks.find((t) => t.id === "eq.wire")?.status, "blocked");
+	assert.doesNotMatch(stderr, /blocked by the worker/);
+});
+
+test("a BLOCKED declaration in an assistant message still halts the run", async () => {
+	const { store, stderr } = await planningRound(
+		jsonSession({
+			type: "message_end",
+			message: { role: "assistant", content: [{ type: "text", text: "BLOCKED: an unprivileged app cannot equalize system audio" }] },
+		}),
+		{ extraTasks: `\n[[task]]\nid = "eq.wire"\ntitle = "Wire the screen"\nparent = "eq"\nlevel = "act"\nkind = "code"\nstatus = "todo"\nattempts = 0\n` },
+	);
+
+	const act = store.tasks.find((t) => t.id === "eq.wire");
+	assert.equal(act?.status, "blocked");
+	assert.match(stderr, /blocked by the worker: an unprivileged app cannot equalize system audio/);
+});
+
+test("a killed worker's rejection says what it was doing when the clock ran out", async () => {
+	// The dominant cost of run 13, and the driver's entire record of it was the
+	// budget it had exceeded.
+	const { store, stderr } = await planningRound(
+		`${jsonSession({ type: "tool_execution_start", toolCallId: "a", toolName: "bash", args: { command: "./gradlew connectedAndroidTest" } })}\nsleep 5`,
+		{
+			loop: "worker_timeout_ms = 1500\n",
+			atomic: '\n[atomic]\non_overflow = "promote"\n',
+			extraTasks: `\n[[task]]\nid = "eq.wire"\ntitle = "Wire the screen"\nparent = "eq"\nlevel = "act"\nkind = "code"\nstatus = "todo"\nattempts = 0\n`,
+		},
+	);
+
+	assert.match(stderr, /exceeded its 1500ms budget; stopping it — .*still inside bash after \d+s/);
+	const act = store.tasks.find((t) => t.id === "eq.wire");
+	// It reaches the record the promote decision is reviewed from, too.
+	assert.match(act?.overflow_reason ?? "", /still inside bash/);
+});
 
 test("an accepted planning round leaves the plan ready for its next round", async () => {
 	const { store } = await planningRound(

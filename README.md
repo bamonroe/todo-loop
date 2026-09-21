@@ -204,6 +204,32 @@ stdin before it runs the prompt. Launch it with stdin closed (`</dev/null`, or
 `stdio: ["ignore", ...]`) or it will sit there with the model loaded and idle,
 looking exactly like a slow model.
 
+Each worker runs as `pi -p --approve --mode json`, and the driver reads the
+event stream rather than the text. Text mode prints the final message and
+little else, which is enough to spot a `BLOCKED:` declaration and nothing else
+at all: over a seven-hour run, ten sessions were killed for overrunning their
+budget and the only thing recorded about any of them was that they had. The
+driver now prints one line per tool call as it happens and a summary per
+session:
+
+```
+  → bash ./gradlew assembleDebug
+  → edit app/src/main/java/.../SystemEqualizer.kt
+[todo-loop] session: 14 tool calls (bash×9, edit×5), 3 turns, 47k context / 12k out
+```
+
+and the same summary goes into the rejection a killed worker earns, so a
+task promoted for running out of clock says whether it did too much or sat in
+one wedged command:
+
+```
+worker exceeded its 1800000ms budget; stopping it — 2 tool calls (bash×2),
+1 turn, 19k context / 400 out, still inside bash after 1764s
+```
+
+Output that is not an event stream is passed through unchanged, so a driver
+pointed at an older `pi` still works — it just learns nothing.
+
 ### In-session extension
 
 Keeps everything inside one pi process, replacing the session between tasks.

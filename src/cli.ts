@@ -19,6 +19,7 @@ import {
 	type Config,
 } from "./config.ts";
 import { diagnose, formatChecks } from "./doctor.ts";
+import { describeTelemetry, emptyTelemetry, SessionMonitor, type RunTelemetry } from "./events.ts";
 import { commitAll, evidenceFilePath, gatherEvidence, headCommit, isGitRepo, isTreeClean, loopOwnedPaths, revertTo, runCommand } from "./evidence.ts";
 import { renderAssignmentPrompt } from "./prompt.ts";
 import { maintainNotes } from "./notes.ts";
@@ -228,9 +229,12 @@ function noteOverflow(env: Env, task: Task, files: string[]): void {
  * Unlike a wide diff this is not ambiguous. Wide work may be correct and only
  * broad; work that never finished is not correct yet by definition.
  */
-export function noteBudgetOverflow(env: Env, task: Task, budgetMs: number): void {
+export function noteBudgetOverflow(env: Env, task: Task, budgetMs: number, detail = ""): void {
 	if (env.config.atomic.on_overflow === "off") return;
-	markOverflow(task, `worker used its whole ${budgetMs}ms budget without finishing`);
+	// The detail is what makes the promotion reviewable. "Used its whole budget"
+	// is true of a task that is too large and of one that sat in a wedged Gradle
+	// call for half an hour, and those want opposite responses.
+	markOverflow(task, `worker used its whole ${budgetMs}ms budget without finishing${detail ? `: ${detail}` : ""}`);
 }
 
 const USAGE = `todo — autonomous todo loop for pi
@@ -564,9 +568,12 @@ export function findBlockMarker(output: string): string | undefined {
 
 interface PiRun {
 	code: number;
+	/** What the worker said, assembled from its assistant messages. */
 	output: string;
 	/** The worker was killed for overrunning loop.worker_timeout_ms. */
 	timedOut?: boolean;
+	/** What the session did, for the log and for the reason a rejection carries. */
+	telemetry: RunTelemetry;
 }
 
 /**
@@ -588,6 +595,11 @@ interface PiRun {
  * The trust this grants is project-local files in a repo the loop is already
  * running the test and build commands from, so it widens nothing that the
  * checkpoint and verify config had not already conceded.
+ *
+ * `--mode json` turns stdout into one event per line instead of the handful of
+ * lines text mode prints. The driver was blind without it: it could see that a
+ * worker had overrun its budget but not what it had been doing, which is the
+ * one question ten killed sessions in run 13 all raised. See src/events.ts.
  */
 export function workerArgs(config: Config, prompt: string): { args: string[]; model: string } {
 	// [project].packages replaces pi's global extension discovery with exactly
@@ -599,10 +611,11 @@ export function workerArgs(config: Config, prompt: string): { args: string[]; mo
 	// pi reads a trailing `:suffix` on --model as a thinking level, so an ollama
 	// tag like `qwen3.8-27b:52k` cannot round-trip through the flag. Inheriting
 	// pi's own default is the way out when that bites.
-	if (inheritsWorker(config)) return { args: ["-p", "--approve", ...isolation, "--", prompt], model: "inherited from pi" };
+	const base = ["-p", "--approve", "--mode", "json"];
+	if (inheritsWorker(config)) return { args: [...base, ...isolation, "--", prompt], model: "inherited from pi" };
 	const { provider, model } = splitModelRef(config.models.worker);
 	return {
-		args: ["-p", "--approve", "--provider", provider, "--model", model, ...isolation, "--", prompt],
+		args: [...base, "--provider", provider, "--model", model, ...isolation, "--", prompt],
 		model: `${provider}/${model}`,
 	};
 }
@@ -611,13 +624,13 @@ function runPi(env: Env, prompt: string, dryRun: boolean, budgetMs = 0): Promise
 	const { args, model } = workerArgs(env.config, prompt);
 	if (dryRun) {
 		console.log(`--- would run pi (${model}) with prompt ---\n${prompt}\n--- end prompt ---`);
-		return Promise.resolve({ code: 0, output: "" });
+		return Promise.resolve({ code: 0, output: "", telemetry: emptyTelemetry() });
 	}
 	return new Promise((resolve) => {
 		// stdin must be closed: pi's print mode waits for EOF before it runs the
 		// prompt, so an inherited pipe makes it hang with the model loaded and idle.
-		// stdout is piped so the run can be read for a BLOCKED marker, and echoed
-		// so it still streams.
+		// stdout is piped so the event stream can be read, and rendered back out
+		// a line at a time so the run still streams to whoever is watching.
 		// Tell the extension which side of the loop it is on. Both read the same
 		// `loop.running` flag, so without this the session drives the loop too:
 		// every task verified and committed twice, then a failed attempt to
@@ -636,14 +649,15 @@ function runPi(env: Env, prompt: string, dryRun: boolean, budgetMs = 0): Promise
 			stdio: ["ignore", "pipe", "inherit"],
 			env: { ...process.env, TODOLOOP_DRIVER: "shell", TODOLOOP_EVIDENCE_FILE: env.evidenceFile },
 		});
-		let output = "";
-		child.stdout?.on("data", (chunk: Buffer) => {
-			output += chunk.toString();
-			process.stdout.write(chunk);
-		});
+		const monitor = new SessionMonitor({ onLine: (line) => process.stdout.write(`${line}\n`) });
+		// setEncoding, not chunk.toString(): a chunk boundary can fall inside a
+		// multi-byte character, and half a character in the middle of a JSON line
+		// is an event silently lost.
+		child.stdout?.setEncoding("utf8");
+		child.stdout?.on("data", (chunk: string) => monitor.feed(chunk));
 		child.on("error", (error) => {
 			console.error(`failed to launch pi: ${error.message}`);
-			resolve({ code: 127, output });
+			resolve({ code: 127, output: monitor.text, telemetry: monitor.telemetry });
 		});
 		// Kill an overrunning worker rather than letting one lost session spend the
 		// night. SIGTERM first so pi can wind down; SIGKILL if it will not.
@@ -651,7 +665,11 @@ function runPi(env: Env, prompt: string, dryRun: boolean, budgetMs = 0): Promise
 		const timer = budget
 			? setTimeout(() => {
 					timedOut = true;
-					console.error(`worker exceeded its ${budget}ms budget; stopping it`);
+					// Read the telemetry *before* the kill, while the stuck tool is
+					// still stuck: this is the moment the question "doing what?" has an
+					// answer, and it is gone a second later.
+					const doing = describeTelemetry(monitor.telemetry);
+					console.error(`worker exceeded its ${budget}ms budget; stopping it${doing ? ` — ${doing}` : ""}`);
 					child.kill("SIGTERM");
 					setTimeout(() => child.kill("SIGKILL"), 10_000).unref();
 				}, budget)
@@ -659,9 +677,15 @@ function runPi(env: Env, prompt: string, dryRun: boolean, budgetMs = 0): Promise
 
 		child.on("close", (code) => {
 			if (timer) clearTimeout(timer);
+			monitor.end();
 			// Reported as a failure, not as output: a half-written session that got
 			// cut off must not reach the verifier looking like finished work.
-			resolve({ code: timedOut ? EXIT_ERROR : (code ?? EXIT_ERROR), output, timedOut });
+			resolve({
+				code: timedOut ? EXIT_ERROR : (code ?? EXIT_ERROR),
+				output: monitor.text,
+				timedOut,
+				telemetry: monitor.telemetry,
+			});
 		});
 	});
 }
@@ -782,6 +806,11 @@ async function runLoop(
 		console.log(`\n=== [${iteration}/${maxIterations}] ${kind} — ${task.id}: ${task.title} ===`);
 		const budgetMs = planning ? env.config.loop.plan_timeout_ms : env.config.loop.worker_timeout_ms;
 		const result = await runPi(env, prompt, dryRun, budgetMs);
+		// Printed on every session, not only the ones that overran. A run's
+		// budget overruns are only legible against what an ordinary session
+		// costs, and run 13 recorded neither.
+		const cost = describeTelemetry(result.telemetry);
+		if (cost) console.log(`[todo-loop] session: ${cost}`);
 		if (result.code !== 0) console.error(`pi exited ${result.code}; verifying anyway`);
 
 		refresh();
@@ -814,7 +843,7 @@ async function runLoop(
 				? await verifyTask(env, current)
 				: planning
 					? await timedOutRound(env, current, budgetMs)
-					: { pass: false, reason: `Worker exceeded its ${budgetMs}ms budget.` };
+					: { pass: false, reason: `Worker exceeded its ${budgetMs}ms budget${cost ? ` (${cost})` : ""}.` };
 		// A planning round's check reloads the store to see the rows the worker
 		// wrote, so anything held across that call now points at a discarded copy
 		// of the queue. Re-find before mutating: every write from here down —
@@ -894,7 +923,7 @@ async function runLoop(
 		// where `live` is the row the promote check below actually reads. Planning
 		// rounds are exempt: a short round is not a broken one, timedOutRound()
 		// already judges those on what they landed.
-		if (result.timedOut && !planning) noteBudgetOverflow(env, live, budgetMs);
+		if (result.timedOut && !planning) noteBudgetOverflow(env, live, budgetMs, cost);
 
 		// Out of attempts. An oversized task becomes a plan; anything else blocks.
 		//
