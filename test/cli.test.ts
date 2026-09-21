@@ -295,6 +295,19 @@ test("a BLOCKED declaration in an assistant message still halts the run", async 
 	assert.match(stderr, /blocked by the worker: an unprivileged app cannot equalize system audio/);
 });
 
+test("the last thing a worker said counts even without its closing newline", async () => {
+	// A killed session's stdout ends mid-stream, and the last line is exactly
+	// the one worth having. Without the flush at close it is dropped, and a
+	// refusal the worker did make reads as a worker that said nothing.
+	const last = '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"BLOCKED: the emulator never booted"}]}}';
+	const { store, stderr } = await planningRound(`printf '%s\\n%s' '{"type":"agent_start"}' '${last}'`, {
+		extraTasks: `\n[[task]]\nid = "eq.wire"\ntitle = "Wire the screen"\nparent = "eq"\nlevel = "act"\nkind = "code"\nstatus = "todo"\nattempts = 0\n`,
+	});
+
+	assert.equal(store.tasks.find((t) => t.id === "eq.wire")?.status, "blocked");
+	assert.match(stderr, /blocked by the worker: the emulator never booted/);
+});
+
 test("a killed worker's rejection says what it was doing when the clock ran out", async () => {
 	// The dominant cost of run 13, and the driver's entire record of it was the
 	// budget it had exceeded.
