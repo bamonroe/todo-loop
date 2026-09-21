@@ -282,7 +282,7 @@ export function renderPlanPrompt(store: Store, task: Task, options: PromptOption
 			"Fewer than that is fine — and better than padding. You will be asked again after these are done, with the results in front of you, so anything you cannot decide well right now is not lost. It is simply not this round's question.",
 			"",
 			`1. **Look, briefly.** Read what is on disk — the files, the tooling, what the last steps left behind${options.memoryFile ? `, and \`${options.memoryFile}\` for what earlier rounds already found out` : ""}. A round decided without looking invents work that does not need doing and misses work that does.`,
-			`   You have about ${lookBudget} commands for this, and the harness will say so when they are gone. **Anything you cannot settle in them is not a question to keep digging at — it is a research act.** Write it down in one line and move on. Finding out is work; it belongs in the queue like any other work, where it gets its own session and is read by every round after it. A round that spends itself looking and writes nothing has produced nothing.`,
+			`   You have about ${lookBudget} commands for this, and the harness will say so when they are gone. That limit is about what a planning round is *for*, not about what a tool costs — a call is cheap, and a round that spends itself finding things out has still produced nothing. **Anything you cannot settle in them is not a question to keep digging at — it is a research act.** Write it down in one line and move on. Finding out is work; it belongs in the queue like any other work, where it gets its own session and is read by every round after it. A round that spends itself looking and writes nothing has produced nothing.`,
 			"2. **Then write them down, one at a time.** Add each item the moment you decide it. Do not work them all out first: planning the whole batch before writing anything means holding every item in your head at once and re-deciding earlier ones as later ones change, and if this session ends early everything you worked out is lost while a written item is already safe.",
 			"",
 			"**On the record beats exactly right.** A one-line item that exists is worth more than the same item worked out perfectly and never written, and far more than the third pass over one you already settled. Nothing decided here is final: the next round reads these items with their results beside them and can correct any of it.",
@@ -488,6 +488,46 @@ function provenanceBlock(): string {
 }
 
 /**
+ * What a turn costs, because the worker has been guessing and guessing wrong.
+ *
+ * Measured over eight sessions of one real run: every tool call the worker made
+ * — builds, lint, API lookups, file reads, an emulator screenshot — cost 1.3
+ * minutes in total. Its own generation cost 123 minutes, and 98% of the
+ * characters it generated were reasoning.
+ *
+ * The three worst turns took eleven to twelve minutes each and produced no tool
+ * call until the end. In them the worker wrote out an API signature from
+ * memory, argued with itself about whether a parameter existed (it did not),
+ * drafted the whole file in prose, and then wrote the file. One of those turns
+ * opens by planning its tool calls with the note "keep count low!". We had told
+ * it tools were expensive. They are the cheapest thing in the session, and it
+ * was economising on the wrong resource with our encouragement.
+ *
+ * The confusion is worth naming precisely, because the frugality it learnt was
+ * half right: a large tool *result* does cost context, which is what the narrow
+ * tools exist to fix. That is an argument for a better-aimed call, never for a
+ * call not made.
+ *
+ * Act sessions only. A planning round already hears that deliberation is its
+ * most expensive act, and its look budget is about what a round is *for* rather
+ * than about what tools cost.
+ */
+function economicsBlock(): string {
+	return [
+		"## What a turn actually costs",
+		"Calling a tool is one of the cheapest things you can do here. Generating text is the most expensive, and on a local model it is not close: a lookup comes back in about a second, and a page of reasoning takes minutes of real time.",
+		"",
+		"Nothing counts your calls. What costs you is the *size* of a result, not the number of them — which is what the narrow tools are for. The answer to an expensive result is a better-aimed call, never a call you did not make.",
+		"",
+		"So:",
+		"",
+		"- **Look it up instead of recalling it.** If you are writing out a signature from memory, or arguing with yourself about whether some parameter exists, stop and ask the tool. You are spending the expensive resource to manufacture a guess, and the guess costs you a failed build later.",
+		"- **Do not draft code in your reasoning.** Write the file. Anything written twice is paid for twice, and only the copy in the file is ever compiled.",
+		"- **Let the build settle what you cannot.** When two approaches look equally good, build the smaller one and read what the compiler says. It answers in seconds and it is never wrong about your code; you can reason for ten minutes and still be guessing.",
+	].join("\n");
+}
+
+/**
  * How to read and change code here.
  *
  * The counterpart to `worker_check`, and the same argument: a generic prompt
@@ -590,6 +630,10 @@ export function renderActPrompt(store: Store, task: Task, options: PromptOptions
 	if (inherited) parts.push(inherited);
 
 	parts.push(provenanceBlock());
+	// After provenance and before the tooling: it is the same argument one step
+	// on. Provenance says a tool result is worth more than your own text; this
+	// says it also costs less.
+	parts.push(economicsBlock());
 
 	const actTools = toolingBlock(options.workerTools);
 	if (actTools) parts.push(actTools);

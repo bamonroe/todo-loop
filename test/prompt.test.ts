@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ancestryOf, renderAssignmentPrompt, renderPinnedTask, renderActPrompt } from "../src/prompt.ts";
+import { ancestryOf, renderAssignmentPrompt, renderPinnedTask, renderActPrompt, renderPlanPrompt } from "../src/prompt.ts";
 import { findTask } from "../src/store.ts";
 import { parseStore } from "../src/store.ts";
 
@@ -571,4 +571,41 @@ status = "todo"
 		text.indexOf("## What in this conversation is evidence") < text.indexOf("treesitter_outline"),
 		"provenance must precede the tool guidance",
 	);
+});
+
+test("an act is told which resource is actually expensive", () => {
+	// The worker had learnt the opposite from us, and acted on it: one measured
+	// twelve-minute turn opened by planning its tool calls with "keep count
+	// low!" and then reconstructed an API signature from memory rather than
+	// spending a second asking for it.
+	const prompt = renderActPrompt(store, task, { mode: "tool", workerTools: "Use treesitter_outline first." });
+	assert.match(prompt, /Calling a tool is one of the cheapest things/);
+	assert.match(prompt, /Nothing counts your calls/);
+	assert.match(prompt, /Look it up instead of recalling it/);
+	assert.match(prompt, /Do not draft code in your reasoning/);
+	assert.match(prompt, /Let the build settle what you cannot/);
+
+	// The distinction the worker got wrong: a big result is expensive, a call
+	// is not. Without it, "tools are cheap" contradicts a project's own advice
+	// to read outlines rather than whole files.
+	assert.match(prompt, /the \*size\* of a result, not the number of them/);
+});
+
+test("the cost of a turn is stated before the project's own tool advice", () => {
+	// A project's tooling text is written in terms of what each call costs
+	// ("outline instead of the whole file"), which reads as thrift about calls
+	// unless the framing arrives first.
+	const prompt = renderActPrompt(store, task, { mode: "tool", workerTools: "Use treesitter_outline first." });
+	assert.ok(
+		prompt.indexOf("## What a turn actually costs") < prompt.indexOf("## How to read and change code here"),
+		"economics comes before the project's tooling block",
+	);
+});
+
+test("a planning round gets the clarification, not the whole argument", () => {
+	// Planners already hear that deliberation is their most expensive act. What
+	// they needed was for the look budget to stop reading as a price on tools.
+	const prompt = renderPlanPrompt(store, store.tasks[0], { mode: "tool" });
+	assert.doesNotMatch(prompt, /What a turn actually costs/);
+	assert.match(prompt, /That limit is about what a planning round is \*for\*, not about what a tool costs/);
 });
