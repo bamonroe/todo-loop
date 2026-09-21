@@ -534,6 +534,54 @@ test("todo_add files this round's items under the plan", async () => {
 	assert.equal(tasks[2].level, "plan");
 });
 
+test("a second item titled like the first is added, and said to be alike", async () => {
+	// Run 13, iterations 25/26/27: the same dead end three times over four and
+	// a half hours. A retry has no memory of the last one, so the only place
+	// this can be noticed is the moment the row goes in.
+	withEpic();
+	await run("todo-run");
+	await call("todo_add", { title: "Rotate the signing secrets", detail: "src/keys.ts" });
+	const second = await call("todo_add", { title: "Rotate the signing secret", detail: "src/keys.ts again" });
+
+	assert.equal(second.isError, undefined, "advisory, never a refusal");
+	assert.equal(store().tasks.length, 3, "and the item really is queued");
+	const text = JSON.stringify(second.content);
+	assert.match(text, /auth\.rotate-the-signing-secrets \(todo\) is already titled/);
+	assert.match(text, /drop one of them/);
+});
+
+test("an item resembling a finished sibling is flagged too", async () => {
+	// The one that matters most: the round that re-queues what it already did.
+	withEpic();
+	await run("todo-run");
+	await call("todo_add", { title: "Rotate the signing secrets", detail: "src/keys.ts" });
+	const tasks = store();
+	tasks.tasks[1].status = "done";
+	saveStore(path.join(h.repo, "todo.toml"), tasks);
+
+	const again = await call("todo_add", { title: "Rotate the signing secrets now", detail: "src/keys.ts" });
+	assert.match(JSON.stringify(again.content), /\(done\) is already titled/);
+});
+
+test("an item unlike its siblings carries no duplicate note", async () => {
+	withEpic();
+	await run("todo-run");
+	await call("todo_add", { title: "Rotate the signing secrets", detail: "src/keys.ts" });
+	const other = await call("todo_add", { title: "Add a TOTP second factor", detail: "src/mfa.ts" });
+	assert.ok(!/already titled/.test(JSON.stringify(other.content)), "no false alarm on unrelated work");
+});
+
+test("an id that had to be disambiguated says so", async () => {
+	// Two rows one character apart in id and identical in intent is exactly
+	// what the -2 suffix hides. The suffix is right; doing it silently is not.
+	withEpic();
+	await run("todo-run");
+	await call("todo_add", { title: "Rotate the signing secrets", detail: "src/keys.ts", id: "rotate" });
+	const second = await call("todo_add", { title: "Something else entirely here", detail: "src/other.ts", id: "rotate" });
+	assert.match(JSON.stringify(second.content), /auth\.rotate was taken, so this went in as auth\.rotate-2/);
+	assert.equal(store().tasks[2].id, "auth.rotate-2");
+});
+
 test("todo_add refuses on an act", async () => {
 	await run("todo-run"); // the default queue head, "greet", is a plain act
 	const result = await call("todo_add", { title: "Something else entirely", detail: "..." });

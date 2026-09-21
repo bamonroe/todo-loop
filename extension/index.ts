@@ -64,7 +64,7 @@ import {
 	type Task,
 	type TaskLevel,
 } from "../src/store.ts";
-import { checkPlanRound, type PlanVerdict } from "../src/plan.ts";
+import { checkPlanRound, nearDuplicate, type PlanVerdict } from "../src/plan.ts";
 
 /**
  * The most a single todo_read relation may return. A breakdown of thirty
@@ -807,7 +807,13 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			const id = uniqueId(store, params.id?.trim() || slugify(params.title), parent.id);
+			// Asked before the row is inserted, and against every sibling
+			// including the finished ones: the failure this catches is a round
+			// re-queueing the step it already attempted, and by definition that
+			// one is no longer open.
+			const echo = nearDuplicate(params.title.trim(), childrenOf(parent.id, store.tasks));
+			const wanted = params.id?.trim() || slugify(params.title);
+			const id = uniqueId(store, wanted, parent.id);
 			// Built through the factory so the row carries whatever metadata this
 			// file's schema gives every other row — a child the loop added should
 			// not be identifiable as such.
@@ -826,11 +832,31 @@ export default function (pi: ExtensionAPI) {
 			write(store);
 
 			const total = childrenOf(parent.id, store.tasks).length;
+			// Both notes are advisory. Refusing here would be wrong — two steps
+			// that read alike are sometimes genuinely two steps — but adding it
+			// silently is worse: run 13 spent four and a half hours across three
+			// iterations on one dead end, and nothing in the queue or in any
+			// tool result ever said the work was already there.
+			const notes: string[] = [];
+			if (!id.endsWith(wanted)) {
+				notes.push(`Note that ${parent.id}.${wanted} was taken, so this went in as ${id}.`);
+			}
+			if (echo) {
+				notes.push(
+					`Note that ${echo.task.id} (${echo.task.status}) is already titled "${echo.task.title}". ` +
+						`If that is this same work, call todo_read children and drop one of them from your plan.`,
+				);
+			}
 			return {
 				content: [
-					{ type: "text", text: `Added ${id} [${level === "plan" ? "plan" : kind}] under ${parent.id} (${total} so far).` },
+					{
+						type: "text",
+						text: [`Added ${id} [${level === "plan" ? "plan" : kind}] under ${parent.id} (${total} so far).`, ...notes].join(
+							" ",
+						),
+					},
 				],
-				details: { taskId: id, parent: parent.id, level, kind },
+				details: { taskId: id, parent: parent.id, level, kind, duplicateOf: echo?.task.id },
 			};
 		},
 	});

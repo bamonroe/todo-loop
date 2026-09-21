@@ -153,3 +153,51 @@ export function checkPlanRound(store: Store, task: Task, changedFiles: string[],
 		reason: `${task.id} planned ${added.length} next step(s): ${added.map((c) => `${c.id} [${levelOf(c) === "plan" ? "plan" : kindOf(c)}]`).join(", ")}.`,
 	};
 }
+
+/**
+ * How alike two task titles read, 0 to 1, by Dice coefficient over character
+ * bigrams of their normalised words.
+ *
+ * Character bigrams rather than shared words, for the same reason pi-android
+ * settled on them: titles differing only in a suffix ("… for the debug build"
+ * / "… for the release build") share every word that matters and none of the
+ * ones that distinguish them, while titles saying the same thing in different
+ * grammar ("Add a TOTP factor" / "Adding TOTP second factor") share almost no
+ * whole words at all.
+ */
+export function titleSimilarity(a: string, b: string): number {
+	const norm = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+	const bigrams = (text: string): Set<string> => {
+		const out = new Set<string>();
+		for (let i = 0; i < text.length - 1; i++) out.add(text.slice(i, i + 2));
+		return out;
+	};
+	const left = bigrams(norm(a));
+	const right = bigrams(norm(b));
+	if (!left.size || !right.size) return norm(a) === norm(b) ? 1 : 0;
+	let shared = 0;
+	for (const gram of left) if (right.has(gram)) shared++;
+	return (2 * shared) / (left.size + right.size);
+}
+
+/** Above this, two titles are close enough that a human would ask which was meant. */
+export const DUPLICATE_TITLE_SIMILARITY = 0.75;
+
+/**
+ * The sibling a new title most resembles, if any is close enough to matter.
+ *
+ * This exists because of run 13: iterations 25, 26 and 27 spent four and a
+ * half hours on the same dead end, because a retry has no memory of the last
+ * one and the queue happily held three near-identical rows. todo_add cannot
+ * refuse — sometimes two similar steps really are two steps — but a round that
+ * is about to queue its own previous attempt for the third time should at
+ * least be told so while it can still act on it.
+ */
+export function nearDuplicate(title: string, siblings: Task[]): { task: Task; score: number } | undefined {
+	let best: { task: Task; score: number } | undefined;
+	for (const task of siblings) {
+		const score = titleSimilarity(title, task.title);
+		if (score >= DUPLICATE_TITLE_SIMILARITY && (!best || score > best.score)) best = { task, score };
+	}
+	return best;
+}
