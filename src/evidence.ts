@@ -73,6 +73,41 @@ export function truncateHead(text: string, maxBytes: number): string {
 	return `${slice}\n${truncationNote(maxBytes, total, "first")}`;
 }
 
+/**
+ * Keep both ends, because which end matters is a property of the command, not
+ * of the tool that ran it.
+ *
+ * `bash` keeps its tail on the reasoning that command output earns its verdict
+ * at the end, and that is right for a build. It is exactly wrong for the other
+ * thing workers run through bash: run 13 spent three sessions on `javap`, which
+ * puts the class declaration and the first methods at the *head*, so the tail
+ * rule discarded precisely the part being looked for. The worker noticed and
+ * said so — "earlier greps were being head-truncated by the harness" — and
+ * re-ran the command instead, which is a whole turn at twelve tokens a second.
+ *
+ * Splitting the budget costs nothing a turn does not cost more of.
+ */
+export function truncateMiddle(text: string, maxBytes: number, headShare: number): string {
+	const total = Buffer.byteLength(text, "utf8");
+	if (total <= maxBytes) return text;
+	const buffer = Buffer.from(text, "utf8");
+	const head = Math.max(0, Math.min(maxBytes, Math.round(maxBytes * headShare)));
+	const tail = maxBytes - head;
+	if (!head) return truncateTail(text, maxBytes);
+	if (!tail) return truncateHead(text, maxBytes);
+	const dropped = total - maxBytes;
+	const percent = Math.round((dropped / total) * 100);
+	// Start the tail at a line boundary; a fragment of a line reads as corruption.
+	const rest = buffer.subarray(-tail).toString("utf8");
+	const cut = rest.indexOf("\n");
+	return [
+		buffer.subarray(0, head).toString("utf8"),
+		`[... truncated by todo-loop: showing the first ${head} and last ${tail} of ${total} bytes; ` +
+			`${dropped} bytes (${percent}%) were dropped from the middle to fit the budget, not omitted by the implementer ...]`,
+		cut >= 0 ? rest.slice(cut + 1) : rest,
+	].join("\n");
+}
+
 const MAX_NEW_FILES = 20;
 
 /**

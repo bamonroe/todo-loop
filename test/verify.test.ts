@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Evidence } from "../src/evidence.ts";
-import { truncateHead, truncateTail } from "../src/evidence.ts";
+import { truncateHead, truncateMiddle, truncateTail } from "../src/evidence.ts";
 import { VERIFIER_SYSTEM_PROMPT, buildVerifierPrompt, parseVerdict, verify } from "../src/verify.ts";
 
 const task = { id: "a.one", title: "Add a health endpoint" };
@@ -89,6 +89,31 @@ test("a truncation marker reports how many bytes went missing, not just the budg
 	const tail = truncateTail(text, 1000);
 	assert.match(tail, /showing the last 1000 of 5000 bytes/);
 	assert.match(tail, /4000 bytes \(80%\) were dropped/);
+});
+
+test("a middle cut keeps both ends, because which end matters is a property of the command", () => {
+	// javap goes through bash and puts the class declaration at the head; a
+	// build goes through bash and puts its verdict at the tail. One rule per
+	// tool cannot be right for both.
+	// A 17-byte filler line on purpose: with a line length that divides the
+	// budget the tail lands on a boundary by luck and the trim goes untested.
+	const text = `HEAD MATTERS\n${"filler line here\n".repeat(400)}TAIL MATTERS`;
+	const out = truncateMiddle(text, 400, 0.25);
+	assert.match(out, /^HEAD MATTERS/);
+	assert.match(out, /TAIL MATTERS$/);
+	assert.ok(Buffer.byteLength(out, "utf8") < Buffer.byteLength(text, "utf8"));
+	assert.match(out, /showing the first 100 and last 300 of \d+ bytes/);
+	assert.match(out, /dropped from the middle to fit the budget, not omitted by the implementer/);
+	// The kept tail starts at a line boundary; a half line reads as corruption.
+	const resumed = out.split("not omitted by the implementer ...]\n")[1];
+	assert.ok(resumed.startsWith("filler line here\n"), `tail resumed mid-line: ${JSON.stringify(resumed.slice(0, 40))}`);
+});
+
+test("a middle cut leaves short output entirely alone and degrades to one end at the extremes", () => {
+	assert.equal(truncateMiddle("short", 400, 0.25), "short");
+	const text = `HEAD\n${"x".repeat(5000)}\nTAIL`;
+	assert.match(truncateMiddle(text, 500, 0), /showing the last 500 of/);
+	assert.match(truncateMiddle(text, 500, 1), /showing the first 500 of/);
 });
 
 test("the marker says the cut was the harness's, so a judge does not read it as an unfinished diff", () => {

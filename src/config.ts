@@ -236,7 +236,26 @@ export interface Config {
 		keep_full_turns: number;
 		/** Only tool results at least this large get stubbed. */
 		stub_min_bytes: number;
-		/** Cap on bash/grep output entering context at all. */
+		/**
+		 * Cap on bash/grep/read output entering context at all.
+		 *
+		 * This started at 2048 to protect a 27B's attention, and the number was
+		 * too small by a factor a measurement settles: eight of the twelve Kotlin
+		 * files in the run-13 project are larger than 2048 bytes, the biggest at
+		 * 5306, so a worker reading code it had written itself was handed 39% of
+		 * it. 101 of that run's 548 tool results were capped.
+		 *
+		 * The budget the cap protects is not the one that binds. A 30-minute
+		 * worker session at the measured 12 tokens/second is ~21,600 output
+		 * tokens, and no session has come near a token limit — what runs out is
+		 * wall clock. Extra input costs prefill, which is fast; a re-run command
+		 * costs a whole turn of decode, which was measured at ~19 seconds. And
+		 * the `context` hook already elides any result over `stub_min_bytes` once
+		 * the window is `prune_at_fraction` full, so a larger cap inflates only
+		 * the last `keep_full_turns` turns rather than the whole history.
+		 *
+		 * 8192 fits every source file in that project with room to spare.
+		 */
 		tool_output_max_bytes: number;
 		/**
 		 * Bytes of each *old* thinking block kept when the prune fires.
@@ -349,7 +368,7 @@ export const DEFAULT_CONFIG: Config = {
 		prune_at_fraction: 0.6,
 		keep_full_turns: 3,
 		stub_min_bytes: 2000,
-		tool_output_max_bytes: 2048,
+		tool_output_max_bytes: 8192,
 		thinking_keep_bytes: 600,
 	},
 	ollama: {

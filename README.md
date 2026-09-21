@@ -297,7 +297,7 @@ to build), and asks no model. See
 |---|---|---|
 | `before_agent_start` | Pins the task into the system prompt | No amount of context surgery can then lose the one thing the worker must not forget |
 | `context` | Elides old bulky tool results once past `prune_at_fraction` | A 400-line `read` squats in context for the rest of the task. Stubbing is deterministic, reversible, and the model can re-read |
-| `tool_result` | Caps bash/grep output at `tool_output_max_bytes`, spilling the rest to a temp file | Pi's built-in 50KB limit is far too generous for a 27B |
+| `tool_result` | Caps bash/grep/read output at `tool_output_max_bytes`, keeping both ends and spilling the rest to a temp file | Pi's built-in 50KB limit is far too generous for a 27B; one end is not enough for either |
 | `session_before_compact` | Replaces the prose summary with fields | Prose loses exactly the details a weak model needs to resume |
 | `agent_settled` | Halts if a run ended without `todo_complete` | A model that quietly gives up must never advance the queue |
 

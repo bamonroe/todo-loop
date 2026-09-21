@@ -4,6 +4,7 @@
  * todo.toml afterwards.
  */
 
+import { DEFAULT_CONFIG } from "../src/config.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -386,19 +387,35 @@ test("bulky tool output is capped and spilled to a file", async () => {
 	assert.equal(fs.readFileSync(spill, "utf8"), text);
 });
 
-test("a capped file read keeps the head, a capped command keeps the tail", async () => {
+test("a capped result keeps both ends, weighted towards the one the tool usually needs", async () => {
 	await run("todo-run");
 	const doc = `TOP OF FILE\n${"filler line\n".repeat(500)}END OF FILE`;
 
 	const read = (await h.emit("tool_result", { toolName: "read", content: [{ type: "text", text: doc }] })) as {
 		content: { text: string }[];
 	};
+	// A document is read from the top, so most of the budget goes to the head —
+	// but the end of the file is no longer thrown away entirely.
 	assert.match(read.content[0].text, /TOP OF FILE/);
+	assert.match(read.content[0].text, /END OF FILE/);
+	assert.match(read.content[0].text, /showing the first 48 and last 16 of/);
 
 	const bash = (await h.emit("tool_result", { toolName: "bash", content: [{ type: "text", text: doc }] })) as {
 		content: { text: string }[];
 	};
+	// Command output earns its verdict at the end, so bash weights the tail.
+	// It still keeps a head: run 13 spent three sessions on javap, which puts
+	// what was being looked for at the top and goes through bash.
 	assert.match(bash.content[0].text, /END OF FILE/);
+	assert.match(bash.content[0].text, /TOP OF FILE/);
+	assert.match(bash.content[0].text, /showing the first 16 and last 48 of/);
+});
+
+test("the default cap fits a real source file, which 2048 did not", () => {
+	// Eight of the twelve Kotlin files in the run-13 project were larger than
+	// the old 2048-byte cap; the largest was 5306 bytes, so a worker reading
+	// code it had written itself was handed 39% of it.
+	assert.ok(DEFAULT_CONFIG.context.tool_output_max_bytes >= 5306);
 });
 
 test("small tool output passes through untouched", async () => {
@@ -799,6 +816,14 @@ test("a named tool's result is recorded for the verifier; an unnamed one is not"
 		assert.match(recorded, /Installed app-debug\.apk/);
 		// Every tool result would drown the diff; only the named ones are carried.
 		assert.ok(!recorded.includes("ls said nothing useful"));
+
+		// The entry cap is a share of the verifier's evidence budget, not the
+		// worker's context cap. Those are different budgets under different
+		// pressure, and raising what a worker may read has no business letting
+		// one lint report eat most of what the judge gets to see.
+		await h.emit("tool_result", { toolName: "android_install", content: [{ type: "text", text: "z".repeat(20_000) }] });
+		const big = fs.readFileSync(file, "utf8");
+		assert.match(big, /showing the last 3000 of 20000 bytes/);
 	} finally {
 		delete process.env.TODOLOOP_EVIDENCE_FILE;
 		fs.rmSync(file, { force: true });

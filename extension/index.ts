@@ -30,7 +30,7 @@ import {
 	isGitRepo,
 	isTreeClean,
 	loopOwnedPaths,
-	truncateHead,
+	truncateMiddle,
 	truncateTail,
 } from "../src/evidence.ts";
 import { renderAssignmentPrompt, renderPinnedTask } from "../src/prompt.ts";
@@ -78,16 +78,23 @@ import { verify, type Completer, type Verdict } from "../src/verify.ts";
 const BULKY_TOOLS = new Set(["bash", "grep", "rg", "glob", "list", "read", "web_fetch"]);
 
 /**
- * Which end to keep when a result is too big.
+ * How to split the budget between the two ends when a result is too big.
  *
  * Command output earns its verdict at the end — the exit line, the stack
- * trace, the last failing assertion — so `bash` keeps its tail. Everything
- * else here is a document read from the top: a file, a directory listing, a
- * match list. Keeping *their* tail hands the model the last 2KB of a file and
- * none of its beginning, which is how a run-4 planner read NOTES.md three
- * times and still never saw the top of it.
+ * trace, the last failing assertion — so `bash` spends most of its budget
+ * there. Everything else here is a document read from the top: a file, a
+ * directory listing, a match list. Keeping *their* tail hands the model the
+ * last few KB of a file and none of its beginning, which is how a run-4
+ * planner read NOTES.md three times and still never saw the top of it.
+ *
+ * Neither end is given the whole budget any more. A worker in run 13 said out
+ * loud that "earlier greps were being head-truncated by the harness" while
+ * hunting through `javap`, which puts what it was looking for at the head and
+ * went through `bash`. One rule per tool cannot be right for both, and a
+ * quarter of a budget is cheaper than the turn it takes to re-run a command.
  */
-const TAIL_TRUNCATED_TOOLS = new Set(["bash"]);
+const HEAD_SHARE = new Map([["bash", 0.25]]);
+const DEFAULT_HEAD_SHARE = 0.75;
 
 interface TextBlock {
 	type: string;
@@ -182,13 +189,18 @@ export default function (pi: ExtensionAPI) {
 	 * a tool several times, and the run that mattered is not always the last one.
 	 * Capped per entry for the same reason every other channel is — the verifier
 	 * reads this, and an unbounded lint report would crowd out the diff.
+	 *
+	 * The cap is a share of the verifier's evidence budget and not the worker's
+	 * context cap, which is a different budget under different pressure: raising
+	 * what the worker may read has no business letting one lint report eat most
+	 * of what the judge gets to see.
 	 */
 	const recordEvidence = (toolName: string, text: string | undefined): void => {
 		if (!text || !config.verify.evidence_tools.includes(toolName)) return;
 		try {
 			appendFileSync(
 				evidencePath(),
-				`### ${toolName}\n${truncateTail(text, config.context.tool_output_max_bytes)}\n\n`,
+				`### ${toolName}\n${truncateTail(text, Math.floor(config.verify.max_evidence_bytes / 4))}\n\n`,
 			);
 		} catch {
 			// A verifier that sees less evidence is a worse verifier, not a broken
@@ -1007,12 +1019,12 @@ export default function (pi: ExtensionAPI) {
 
 		let body = text ?? "";
 		if (oversize) {
-			const clip = TAIL_TRUNCATED_TOOLS.has(event.toolName) ? truncateTail : truncateHead;
+			const share = HEAD_SHARE.get(event.toolName) ?? DEFAULT_HEAD_SHARE;
 			spillDir = spillDir ?? mkdtempSync(join(tmpdir(), "todo-loop-"));
 			const file = join(spillDir, `${event.toolName}-${Date.now()}.txt`);
 			try {
 				writeFileSync(file, text as string);
-				body = `${clip(text as string, max)}\n\n[output capped at ${max} bytes; full text at ${file}]`;
+				body = `${truncateMiddle(text as string, max, share)}\n\n[output capped at ${max} bytes; full text at ${file}]`;
 			} catch {
 				if (!nudge) return;
 			}
