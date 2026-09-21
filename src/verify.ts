@@ -37,6 +37,7 @@ export const VERIFIER_SYSTEM_PROMPT = [
 	"- Pass if the diff plausibly accomplishes what the task asked, even if the style is not what you would choose.",
 	"- Fail if the diff does something adjacent to the task instead of the task, is obviously incomplete, or is empty.",
 	"- Do not review for general code quality, naming, or architecture. That is not your job here.",
+	"- A `[... truncated by todo-loop ...]` marker is this harness trimming the evidence to fit a budget. It is not the implementer stopping early, and it is never by itself a reason to fail. Judge what you can see; if what you can see does the task, pass it.",
 	"- When you fail something, state what is missing. Never state how to fix it.",
 	"",
 	'Reply with JSON only, no prose and no code fence: {"pass": true|false, "reason": "one or two sentences"}',

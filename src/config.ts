@@ -72,6 +72,23 @@ export interface Config {
 		evidence_tools: string[];
 		require_tests_pass: boolean;
 		max_evidence_bytes: number;
+		/**
+		 * The diff's own budget, separate from and much larger than the share it
+		 * would get out of `max_evidence_bytes`.
+		 *
+		 * It used to take `max_evidence_bytes / 3` along with each command and the
+		 * tool evidence — 4000 bytes at the default. Run 13 showed what that costs:
+		 * a research act whose entire work product *was* its diff had the tail cut
+		 * off, and the verifier, told to fail an incomplete diff, failed it. Twice,
+		 * identically, because the retry reproduces the cut exactly.
+		 *
+		 * The diff is the one artifact the verdict is actually about, and command
+		 * output is the one that compresses well (the tail carries the verdict).
+		 * They should never have shared a budget. Still a cap and not unlimited:
+		 * a self-hosted verifier has a window too, and a runaway generated file
+		 * should not be able to fill it.
+		 */
+		max_diff_bytes: number;
 		timeout_ms: number;
 	};
 	project: {
@@ -299,6 +316,7 @@ export const DEFAULT_CONFIG: Config = {
 		evidence_tools: [],
 		require_tests_pass: true,
 		max_evidence_bytes: 12000,
+		max_diff_bytes: 48000,
 		timeout_ms: 300000,
 	},
 	project: {
@@ -428,6 +446,7 @@ export function parseConfig(text: string): Config {
 			evidence_tools: pickStringArray(verify, "evidence_tools", DEFAULT_CONFIG.verify.evidence_tools),
 			require_tests_pass: pickBool(verify, "require_tests_pass", DEFAULT_CONFIG.verify.require_tests_pass),
 			max_evidence_bytes: pickNumber(verify, "max_evidence_bytes", DEFAULT_CONFIG.verify.max_evidence_bytes),
+			max_diff_bytes: pickNumber(verify, "max_diff_bytes", DEFAULT_CONFIG.verify.max_diff_bytes),
 			timeout_ms: pickNumber(verify, "timeout_ms", DEFAULT_CONFIG.verify.timeout_ms),
 		},
 		project: {

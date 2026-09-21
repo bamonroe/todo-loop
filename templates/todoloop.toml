@@ -59,7 +59,18 @@ build_command = ""
 #   evidence_tools = ["android_install", "android_instrumented", "android_lint"]
 evidence_tools = []
 require_tests_pass = true
+
+# Split three ways: build output, test output, tool evidence. Logs compress
+# well — the tail carries the verdict — so a third each costs little.
 max_evidence_bytes = 12000
+
+# The diff gets its own, much larger budget. It used to take a third of
+# max_evidence_bytes (4000 bytes), and run 13 showed the cost: a research act
+# whose whole work product was its diff got cut off, and the verifier — told to
+# fail an incomplete diff — failed it twice, identically, because the retry
+# reproduces the cut. Still a cap: a self-hosted verifier has a window too.
+max_diff_bytes = 48000
+
 timeout_ms = 300000
 
 [loop]

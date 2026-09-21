@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Evidence } from "../src/evidence.ts";
-import { truncateTail } from "../src/evidence.ts";
-import { buildVerifierPrompt, parseVerdict, verify } from "../src/verify.ts";
+import { truncateHead, truncateTail } from "../src/evidence.ts";
+import { VERIFIER_SYSTEM_PROMPT, buildVerifierPrompt, parseVerdict, verify } from "../src/verify.ts";
 
 const task = { id: "a.one", title: "Add a health endpoint" };
 
@@ -75,4 +75,28 @@ test("truncateTail keeps the end", () => {
 	assert.match(out, /line 199$/);
 	assert.match(out, /^\[\.\.\. truncated/);
 	assert.ok(Buffer.byteLength(out) < Buffer.byteLength(text));
+});
+
+test("a truncation marker reports how many bytes went missing, not just the budget", () => {
+	const text = "x".repeat(5000);
+
+	const head = truncateHead(text, 1000);
+	assert.match(head, /truncated by todo-loop/);
+	// The number that matters is what is absent, which the old marker never said.
+	assert.match(head, /showing the first 1000 of 5000 bytes/);
+	assert.match(head, /4000 bytes \(80%\) were dropped/);
+
+	const tail = truncateTail(text, 1000);
+	assert.match(tail, /showing the last 1000 of 5000 bytes/);
+	assert.match(tail, /4000 bytes \(80%\) were dropped/);
+});
+
+test("the marker says the cut was the harness's, so a judge does not read it as an unfinished diff", () => {
+	const out = truncateHead("y".repeat(3000), 500);
+	assert.match(out, /not omitted by the implementer/);
+});
+
+test("the verifier is told a truncation marker is never on its own a reason to fail", () => {
+	assert.match(VERIFIER_SYSTEM_PROMPT, /truncated by todo-loop/);
+	assert.match(VERIFIER_SYSTEM_PROMPT, /never by itself a reason to fail/);
 });

@@ -265,6 +265,7 @@ export default function (pi: ExtensionAPI) {
 			requireTestsPass: planning ? false : config.verify.require_tests_pass,
 			timeoutMs: config.verify.timeout_ms,
 			maxBytes: config.verify.max_evidence_bytes,
+			maxDiffBytes: config.verify.max_diff_bytes,
 			exclude: ownedPaths(store),
 			// Only set once a recorded tool has actually run, so a session that
 			// called none reads no file at all.

@@ -79,6 +79,7 @@ test("a failing command short-circuits verification", async () => {
 		requireTestsPass: true,
 		timeoutMs: 10000,
 		maxBytes: 12000,
+		maxDiffBytes: 48000,
 	});
 	assert.match(evidence.hardFailure ?? "", /exit 7/);
 });
@@ -93,6 +94,7 @@ test("no changes at all is itself a hard failure", async () => {
 		requireTestsPass: true,
 		timeoutMs: 10000,
 		maxBytes: 12000,
+		maxDiffBytes: 48000,
 	});
 	assert.match(evidence.hardFailure ?? "", /No file changes/);
 });
@@ -100,7 +102,10 @@ test("no changes at all is itself a hard failure", async () => {
 test("command output is captured and capped", async () => {
 	const result = await runCommand(repo, "seq 1 5000", 20000, 500);
 	assert.equal(result.ok, true);
-	assert.ok(Buffer.byteLength(result.output) <= 600);
+	// The budget bounds the kept output; the marker explaining the cut sits on
+	// top of it, so measure the body rather than the whole string.
+	const body = result.output.split("\n").filter((line) => !line.includes("truncated by todo-loop")).join("\n");
+	assert.ok(Buffer.byteLength(body) <= 500, `body was ${Buffer.byteLength(body)} bytes`);
 	assert.match(result.output, /5000/);
 
 	const failure = await runCommand(repo, "echo boom >&2; exit 3", 20000, 500);
@@ -312,6 +317,7 @@ test("a documentation-only diff does not run the build or the tests", async () =
 		requireTestsPass: true,
 		timeoutMs: 10000,
 		maxBytes: 12000,
+		maxDiffBytes: 48000,
 	});
 
 	assert.equal(evidence.hardFailure, undefined);
@@ -338,6 +344,7 @@ test("one code file in the diff is enough to run them again", async () => {
 		requireTestsPass: true,
 		timeoutMs: 10000,
 		maxBytes: 12000,
+		maxDiffBytes: 48000,
 	});
 
 	assert.deepEqual(evidence.files.sort(), ["NOTES.md", "server.ts"]);
@@ -356,6 +363,7 @@ test("an empty diff is not documentation-only, so the commands still run", async
 		requireTestsPass: true,
 		timeoutMs: 10000,
 		maxBytes: 12000,
+		maxDiffBytes: 48000,
 	});
 
 	// The command failure is what surfaces, which can only happen if it ran.
@@ -378,6 +386,7 @@ test("tool evidence recorded during the session reaches the verifier", async () 
 		requireTestsPass: true,
 		timeoutMs: 10000,
 		maxBytes: 12000,
+		maxDiffBytes: 48000,
 		evidenceFile: file,
 	});
 
@@ -403,10 +412,57 @@ test("no evidence file is ordinary, not an error", async () => {
 		requireTestsPass: true,
 		timeoutMs: 10000,
 		maxBytes: 12000,
+		maxDiffBytes: 48000,
 		evidenceFile: path.join(repo, "nothing-was-recorded.md"),
 	});
 
 	assert.equal(evidence.toolEvidence, undefined);
 	assert.equal(evidence.hardFailure, undefined);
 	assert.ok(!formatEvidence({ id: "eq.x", title: "X" }, evidence).includes("Tool evidence"));
+});
+
+test("the diff gets its own budget instead of a third of the evidence budget", async () => {
+	// A research act's whole work product is its notes append. At the old
+	// maxBytes/3 this was cut to 4000 bytes and the verifier rejected the cut.
+	const notes = `# Notes\n${"a fact that earlier sessions worked out. ".repeat(500)}\n`;
+	assert.ok(Buffer.byteLength(notes) > 12000, "fixture must exceed the whole evidence budget");
+	fs.writeFileSync(path.join(repo, "NOTES.md"), notes);
+
+	const evidence = await gatherEvidence({
+		cwd: repo,
+		baseCommit: base,
+		testCommand: "",
+		buildCommand: "",
+		requireTestsPass: false,
+		timeoutMs: 10000,
+		maxBytes: 12000,
+		maxDiffBytes: 48000,
+	});
+
+	assert.doesNotMatch(evidence.diff, /truncated by todo-loop/);
+	// The end of the append has to survive: it is where sections (c) and (d) were.
+	assert.match(evidence.diff, /a fact that earlier sessions worked out\. $/m);
+
+	fs.rmSync(path.join(repo, "NOTES.md"));
+});
+
+test("the diff budget is still a cap, so a self-hosted verifier cannot be flooded", async () => {
+	const huge = `${"z".repeat(200_000)}\n`;
+	fs.writeFileSync(path.join(repo, "HUGE.md"), huge);
+
+	const evidence = await gatherEvidence({
+		cwd: repo,
+		baseCommit: base,
+		testCommand: "",
+		buildCommand: "",
+		requireTestsPass: false,
+		timeoutMs: 10000,
+		maxBytes: 12000,
+		maxDiffBytes: 48000,
+	});
+
+	assert.match(evidence.diff, /truncated by todo-loop/);
+	assert.ok(Buffer.byteLength(evidence.diff) < 60_000, `diff was ${Buffer.byteLength(evidence.diff)} bytes`);
+
+	fs.rmSync(path.join(repo, "HUGE.md"));
 });

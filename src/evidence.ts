@@ -37,19 +37,40 @@ export interface Evidence {
 	hardFailure?: string;
 }
 
+/**
+ * How much was cut, and by whom.
+ *
+ * The old markers named only the budget, which reads as "this is how much there
+ * was" rather than "this is how much you are missing". Run 13's verifier saw a
+ * diff stop mid-sentence, correctly called it incomplete, and rejected the task
+ * twice — the incompleteness was ours. Naming todo-loop and the dropped byte
+ * count makes the cut legible as a harness artifact with a known size, which is
+ * something a judge can reason about; a bare stop is not.
+ */
+function truncationNote(kept: number, total: number, side: "first" | "last"): string {
+	const dropped = total - kept;
+	const percent = Math.round((dropped / total) * 100);
+	return (
+		`[... truncated by todo-loop: showing the ${side} ${kept} of ${total} bytes; ` +
+		`${dropped} bytes (${percent}%) were dropped to fit the evidence budget, not omitted by the implementer ...]`
+	);
+}
+
 /** Keep the tail: for logs and command output the end is where the verdict is. */
 export function truncateTail(text: string, maxBytes: number): string {
-	if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+	const total = Buffer.byteLength(text, "utf8");
+	if (total <= maxBytes) return text;
 	const slice = Buffer.from(text, "utf8").subarray(-maxBytes).toString("utf8");
 	const cut = slice.indexOf("\n");
 	const body = cut >= 0 ? slice.slice(cut + 1) : slice;
-	return `[... truncated to last ${maxBytes} bytes ...]\n${body}`;
+	return `${truncationNote(maxBytes, total, "last")}\n${body}`;
 }
 
 export function truncateHead(text: string, maxBytes: number): string {
-	if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+	const total = Buffer.byteLength(text, "utf8");
+	if (total <= maxBytes) return text;
 	const slice = Buffer.from(text, "utf8").subarray(0, maxBytes).toString("utf8");
-	return `${slice}\n[... truncated after ${maxBytes} bytes ...]`;
+	return `${slice}\n${truncationNote(maxBytes, total, "first")}`;
 }
 
 const MAX_NEW_FILES = 20;
@@ -278,6 +299,11 @@ export interface EvidenceOptions {
 	requireTestsPass: boolean;
 	timeoutMs: number;
 	maxBytes: number;
+	/**
+	 * The diff's budget. Separate from `maxBytes` because the diff is what the
+	 * verdict is about, and it does not compress the way command output does.
+	 */
+	maxDiffBytes: number;
 	/** Paths kept out of the diff; defaults to the queue and its config. */
 	exclude?: string[];
 	/**
@@ -330,11 +356,16 @@ export function documentationOnly(files: string[]): boolean {
  * is nothing for a model to judge, so we short-circuit before spending a call.
  */
 export async function gatherEvidence(options: EvidenceOptions): Promise<Evidence> {
+	// The diff on its own budget; everything else splits what is left. Command
+	// output and tool evidence are logs — the tail carries the verdict and the
+	// rest is noise — so a third each costs the verifier little. The diff is not
+	// a log, and run 13 proved that cutting it makes the verifier reject the
+	// harness's own trimming.
 	const perPart = Math.max(1000, Math.floor(options.maxBytes / 3));
 	const { diff, files, dirty } = await collectDiff(
 		options.cwd,
 		options.baseCommit,
-		perPart,
+		Math.max(perPart, options.maxDiffBytes),
 		options.exclude ?? DEFAULT_EXCLUDES,
 	);
 

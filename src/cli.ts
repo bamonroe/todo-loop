@@ -152,6 +152,7 @@ async function evidenceFor(env: Env) {
 		requireTestsPass: env.config.verify.require_tests_pass,
 		timeoutMs: env.config.verify.timeout_ms,
 		maxBytes: env.config.verify.max_evidence_bytes,
+		maxDiffBytes: env.config.verify.max_diff_bytes,
 		exclude: queueExcludes(env),
 		evidenceFile: env.evidenceFile,
 	});
