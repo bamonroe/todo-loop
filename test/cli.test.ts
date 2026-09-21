@@ -543,3 +543,77 @@ test("a planning round never carries a tree, however it ended", () => {
 	assert.equal(treeDisposition({ timedOut: true, planning: true, attempts: 1, maxAttempts: 3 }), "revert");
 	assert.equal(treeDisposition({ timedOut: false, planning: true, attempts: 1, maxAttempts: 3 }), "revert");
 });
+
+/**
+ * The carry path, driven end to end with a fake `pi` that gets itself killed.
+ *
+ * Every other test here reasons about the decision; this one proves the loop
+ * acts on it — that the file a killed worker wrote is still there afterwards,
+ * that the next iteration starts on a dirty tree instead of refusing, and that
+ * what the worker was thinking at the kill reaches the retry's prompt.
+ */
+async function killedAttempt(): Promise<{ repo: string; stderr: string; prompts: string[] }> {
+	// The fake pi and its transcript live *outside* the repo. Anything they
+	// write inside it is a dirty tree before the first iteration even starts,
+	// and the gate under test would fire for the wrong reason.
+	const work = fs.mkdtempSync(path.join(os.tmpdir(), "todo-loop-carry-"));
+	const repo = path.join(work, "repo");
+	const bin = path.join(work, "bin");
+	fs.mkdirSync(repo);
+	fs.mkdirSync(bin);
+	const promptLog = path.join(work, "prompts.txt");
+	await run("git", ["init", "-q"], { cwd: repo });
+	await run("git", ["config", "user.email", "t@example.com"], { cwd: repo });
+	await run("git", ["config", "user.name", "t"], { cwd: repo });
+
+	fs.writeFileSync(
+		path.join(repo, "todoloop.toml"),
+		'[models]\nworker = "ollama/fake"\nverifier = "ollama/fake"\n\n[loop]\ncheckpoint = "require-clean"\nworker_timeout_ms = 2000\n',
+	);
+	fs.writeFileSync(
+		path.join(repo, "todo.toml"),
+		'[loop]\nrunning = false\ncurrent = ""\niterations = 0\n\n[[task]]\nid = "sliders"\ntitle = "Write the band sliders"\nlevel = "act"\nkind = "code"\nstatus = "todo"\nattempts = 0\n',
+	);
+	await run("git", ["add", "-A"], { cwd: repo });
+	await run("git", ["commit", "-qm", "start"], { cwd: repo });
+
+	// Emits a thinking delta, writes a real file, then replaces itself with a
+	// sleep so the driver's timeout is what ends it. `exec` matters: SIGTERM has
+	// to reach the thing holding stdout open, or the close never fires.
+	const delta = JSON.stringify({
+		type: "message_update",
+		usage: {},
+		assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "decompiling the Compose jar by hand is a dead end" },
+	});
+	fs.writeFileSync(
+		path.join(bin, "pi"),
+		`#!/bin/sh\nprintf '%s\\n=====\\n' "$*" >> "${promptLog}"\necho '${delta}'\necho 'fun bandSliders() {}' > "${repo}/BandSliders.kt"\nexec sleep 8\n`,
+		{ mode: 0o755 },
+	);
+
+	const result = await run("node", ["--experimental-strip-types", cli, "run", "--max", "2", "--cwd", repo], {
+		cwd: repo,
+		env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+	}).catch((error: { stdout?: string; stderr?: string }) => error);
+
+	const prompts = fs.readFileSync(promptLog, "utf8").split("\n=====\n").filter((p) => p.trim());
+	return { repo, stderr: result.stderr ?? "", prompts };
+}
+
+test("a killed act keeps its file, and the next attempt starts on it", async () => {
+	const { repo, stderr, prompts } = await killedAttempt();
+	assert.equal(prompts.length, 2, `two attempts should have run: ${stderr}`);
+	assert.ok(fs.existsSync(path.join(repo, "BandSliders.kt")), "the file the killed worker wrote survived the rejection");
+	assert.match(stderr, /kept the working tree/);
+	assert.match(stderr, /carrying forward sliders/);
+	assert.doesNotMatch(stderr, /refusing to start a task/, "the clean-tree gate let the task's own mess through");
+});
+
+test("the retry is handed the tree and the thoughts of the attempt before it", async () => {
+	const { prompts } = await killedAttempt();
+	const retry = prompts[1]!;
+	assert.match(retry, /## What the last attempt left you/);
+	assert.match(retry, /still in the working tree/);
+	assert.match(retry, /decompiling the Compose jar by hand is a dead end/);
+	assert.doesNotMatch(prompts[0]!, /What the last attempt left you/, "the first attempt inherits nothing");
+});
