@@ -1,3 +1,10 @@
 node_modules/
 *.tmp-*
-node_modules/
+
+# LaTeX build artefacts; the PDF itself is committed.
+docs/architecture/*.aux
+docs/architecture/*.fdb_latexmk
+docs/architecture/*.fls
+docs/architecture/*.log
+docs/architecture/*.out
+docs/architecture/*.toc
