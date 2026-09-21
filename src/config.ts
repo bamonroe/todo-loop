@@ -50,6 +50,26 @@ export interface Config {
 		 * which is the right fallback for a project with no tooling of its own.
 		 */
 		worker_check: string;
+		/**
+		 * Tool names whose results are carried to the verifier.
+		 *
+		 * The verifier reads the task, the diff and the output of the build and
+		 * test commands — and nothing else. A worker's own tool calls happen
+		 * inside a session the verifier never sees, so a task whose proof lives in
+		 * a tool result rather than in a build log is unverifiable by
+		 * construction. Run 12 hit it exactly: a planning round wrote "finish by
+		 * verifying android_install succeeds on the booted emulator", the worker
+		 * did that, and the verifier rejected the task because the only trace of
+		 * it was a sentence the worker had written into NOTES.md. It was right to.
+		 * A claim is not evidence.
+		 *
+		 * Named tools get their results recorded as they happen and appended to
+		 * the evidence, labelled as captured output rather than as the worker's
+		 * account of it. Keep the list to the tools that *prove* something the
+		 * build cannot — an install, an instrumented run, a lint report. Every
+		 * entry costs verifier context on every task that calls it.
+		 */
+		evidence_tools: string[];
 		require_tests_pass: boolean;
 		max_evidence_bytes: number;
 		timeout_ms: number;
@@ -276,6 +296,7 @@ export const DEFAULT_CONFIG: Config = {
 		test_command: "",
 		build_command: "",
 		worker_check: "",
+		evidence_tools: [],
 		require_tests_pass: true,
 		max_evidence_bytes: 12000,
 		timeout_ms: 300000,
@@ -404,6 +425,7 @@ export function parseConfig(text: string): Config {
 			test_command: pickString(verify, "test_command", DEFAULT_CONFIG.verify.test_command),
 			build_command: pickString(verify, "build_command", DEFAULT_CONFIG.verify.build_command),
 			worker_check: pickString(verify, "worker_check", DEFAULT_CONFIG.verify.worker_check),
+			evidence_tools: pickStringArray(verify, "evidence_tools", DEFAULT_CONFIG.verify.evidence_tools),
 			require_tests_pass: pickBool(verify, "require_tests_pass", DEFAULT_CONFIG.verify.require_tests_pass),
 			max_evidence_bytes: pickNumber(verify, "max_evidence_bytes", DEFAULT_CONFIG.verify.max_evidence_bytes),
 			timeout_ms: pickNumber(verify, "timeout_ms", DEFAULT_CONFIG.verify.timeout_ms),

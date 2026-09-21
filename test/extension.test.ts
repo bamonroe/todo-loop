@@ -777,3 +777,43 @@ test("todo_read refuses when nothing is assigned", async () => {
 	const result = await readTool({});
 	assert.equal(result.isError, true);
 });
+
+test("a named tool's result is recorded for the verifier; an unnamed one is not", async () => {
+	// The channel this opens is the only one there is. The verifier reads the
+	// task, the diff and the build/test output — a worker's tool calls happen
+	// inside a session it never sees, so without this an install can only be
+	// claimed, never shown.
+	fs.writeFileSync(
+		path.join(h.repo, "todoloop.toml"),
+		CONFIG.replace("max_attempts = 3", 'max_attempts = 3\nevidence_tools = ["android_install"]'),
+	);
+	const file = path.join(h.repo, "..", `evidence-${process.pid}-${Date.now()}.md`);
+	process.env.TODOLOOP_EVIDENCE_FILE = file;
+	try {
+		await run("todo-run");
+		await h.emit("tool_result", { toolName: "android_install", content: [{ type: "text", text: "Installed app-debug.apk." }] });
+		await h.emit("tool_result", { toolName: "bash", content: [{ type: "text", text: "ls said nothing useful" }] });
+
+		const recorded = fs.readFileSync(file, "utf8");
+		assert.match(recorded, /### android_install/);
+		assert.match(recorded, /Installed app-debug\.apk/);
+		// Every tool result would drown the diff; only the named ones are carried.
+		assert.ok(!recorded.includes("ls said nothing useful"));
+	} finally {
+		delete process.env.TODOLOOP_EVIDENCE_FILE;
+		fs.rmSync(file, { force: true });
+	}
+});
+
+test("nothing is recorded when no tool is named", async () => {
+	const file = path.join(h.repo, "..", `evidence-none-${process.pid}-${Date.now()}.md`);
+	process.env.TODOLOOP_EVIDENCE_FILE = file;
+	try {
+		await run("todo-run");
+		await h.emit("tool_result", { toolName: "android_install", content: [{ type: "text", text: "Installed app-debug.apk." }] });
+		assert.equal(fs.existsSync(file), false, "an empty allowlist writes no file at all");
+	} finally {
+		delete process.env.TODOLOOP_EVIDENCE_FILE;
+		fs.rmSync(file, { force: true });
+	}
+});

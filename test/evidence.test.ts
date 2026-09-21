@@ -8,6 +8,7 @@ import {
 	changedFiles,
 	collectDiff,
 	commitAll,
+	formatEvidence,
 	gatherEvidence,
 	headCommit,
 	isTreeClean,
@@ -359,4 +360,53 @@ test("an empty diff is not documentation-only, so the commands still run", async
 
 	// The command failure is what surfaces, which can only happen if it ran.
 	assert.match(evidence.hardFailure ?? "", /exit 9/);
+});
+
+test("tool evidence recorded during the session reaches the verifier", async () => {
+	await commitAll(repo, "todo(x): settle before the evidence tests");
+	const now = await headCommit(repo);
+	fs.appendFileSync(path.join(repo, "server.ts"), "export const ready = true;\n");
+
+	const file = path.join(repo, "..", `tool-evidence-${process.pid}.md`);
+	fs.writeFileSync(file, "### android_install\nInstalled app-debug.apk.\n");
+
+	const evidence = await gatherEvidence({
+		cwd: repo,
+		baseCommit: now,
+		buildCommand: "true",
+		testCommand: "",
+		requireTestsPass: true,
+		timeoutMs: 10000,
+		maxBytes: 12000,
+		evidenceFile: file,
+	});
+
+	assert.match(evidence.toolEvidence ?? "", /Installed app-debug\.apk/);
+	// It has to survive into what the verifier actually reads, labelled as the
+	// tools' own output — a claim in the diff is what this exists to replace.
+	const rendered = formatEvidence({ id: "eq.scaffold", title: "Scaffold" }, evidence);
+	assert.match(rendered, /## Tool evidence recorded during the session/);
+	assert.match(rendered, /not the worker's account of it/);
+	assert.match(rendered, /Installed app-debug\.apk/);
+	fs.rmSync(file, { force: true });
+});
+
+test("no evidence file is ordinary, not an error", async () => {
+	const now = await headCommit(repo);
+	fs.appendFileSync(path.join(repo, "server.ts"), "export const port2 = 3001;\n");
+
+	const evidence = await gatherEvidence({
+		cwd: repo,
+		baseCommit: now,
+		buildCommand: "true",
+		testCommand: "",
+		requireTestsPass: true,
+		timeoutMs: 10000,
+		maxBytes: 12000,
+		evidenceFile: path.join(repo, "nothing-was-recorded.md"),
+	});
+
+	assert.equal(evidence.toolEvidence, undefined);
+	assert.equal(evidence.hardFailure, undefined);
+	assert.ok(!formatEvidence({ id: "eq.x", title: "X" }, evidence).includes("Tool evidence"));
 });

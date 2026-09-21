@@ -43,6 +43,21 @@ max_attempts = 3
 # model call entirely — tooling should answer the mechanical questions.
 test_command = ""
 build_command = ""
+# Tool names whose results are carried to the verifier.
+#
+# The verifier reads the task, the diff and the build/test output — and nothing
+# else. A worker's tool calls happen inside a session it never sees, so a task
+# whose proof is a tool result rather than a build log cannot be verified at
+# all: the worker ends up writing "the install succeeded" into a notes file and
+# the verifier, correctly, refuses to accept a claim as evidence.
+#
+# Named tools get their output recorded as it happens and appended to the
+# evidence, labelled as the tools' own output. Keep the list to tools that prove
+# something the build cannot — an install, an instrumented run, a lint report.
+# Each entry costs verifier context on every task that calls it.
+#
+#   evidence_tools = ["android_install", "android_instrumented", "android_lint"]
+evidence_tools = []
 require_tests_pass = true
 max_evidence_bytes = 12000
 timeout_ms = 300000
@@ -81,9 +96,12 @@ max_files = 5
 #   warn    record it on the task; `todo doctor` and `todo status` show it
 #   promote turn it into a scope so the next pass breaks it down
 #   off     ignore
-# "promote" only acts when the task *also* failed verification, on the grounds
-# that failed-and-oversized is far more likely to be a queue bug than a worker
-# that nearly got there.
+# "promote" acts only on a task that is oversized *and* has spent every attempt.
+# Promoting on the first rejection was measured as worse: a scaffold rejected
+# once, for a reason that had nothing to do with its size, became a plan with
+# two attempts unspent — and no piece of a scaffold builds on its own, so every
+# child then failed the gate its parent would have passed. One rejection is
+# ordinary; three on an oversized task is the signal.
 on_overflow = "warn"
 
 [context]

@@ -8,7 +8,9 @@
  */
 
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 
@@ -26,6 +28,11 @@ export interface Evidence {
 	files: string[];
 	dirty: boolean;
 	commands: CommandRun[];
+	/**
+	 * Results from the worker's own tools, captured as they ran. Present only
+	 * when `verify.evidence_tools` names something the session actually called.
+	 */
+	toolEvidence?: string;
 	/** Mechanical failure that short-circuits the model call entirely. */
 	hardFailure?: string;
 }
@@ -249,6 +256,20 @@ export async function runCommand(cwd: string, command: string, timeoutMs: number
 	}
 }
 
+/**
+ * Where a project's worker records tool results for the verifier.
+ *
+ * Keyed on the project path rather than a pid so the driver and anything else
+ * that needs to find it — a test, a person debugging a rejection — agree on one
+ * name without passing it around. Outside the repository, always: the
+ * checkpoint commit is `git add -A`, and evidence about a task has no business
+ * being committed as part of it.
+ */
+export function evidenceFilePath(cwd: string): string {
+	const tag = createHash("sha1").update(path.resolve(cwd)).digest("hex").slice(0, 8);
+	return path.join(os.tmpdir(), `todo-loop-evidence-${path.basename(cwd)}-${tag}.md`);
+}
+
 export interface EvidenceOptions {
 	cwd: string;
 	baseCommit: string;
@@ -259,6 +280,12 @@ export interface EvidenceOptions {
 	maxBytes: number;
 	/** Paths kept out of the diff; defaults to the queue and its config. */
 	exclude?: string[];
+	/**
+	 * Where the session recorded results from `verify.evidence_tools`. Read if
+	 * it exists; a missing file means the worker called none of them, which is
+	 * not an error — most tasks need none.
+	 */
+	evidenceFile?: string;
 }
 
 /**
@@ -325,6 +352,11 @@ export async function gatherEvidence(options: EvidenceOptions): Promise<Evidence
 		);
 	}
 
+	// Read, never run: by the time this executes the session is over. The file is
+	// the only channel from inside the worker's session to the verifier, and it
+	// carries what the tools returned rather than what the worker said they did.
+	const toolEvidence = await readToolEvidence(options.evidenceFile, perPart);
+
 	const failed = commands.find((entry) => !entry.ok);
 	const hardFailure =
 		options.requireTestsPass && failed
@@ -333,7 +365,23 @@ export async function gatherEvidence(options: EvidenceOptions): Promise<Evidence
 				? "No file changes were made for this task."
 				: undefined;
 
-	return { diff, files, dirty, commands, hardFailure };
+	return { diff, files, dirty, commands, toolEvidence, hardFailure };
+}
+
+/**
+ * A tool's own output is not a hard failure even when it failed. The build and
+ * test commands are the gate; this is context for the model's judgement, and a
+ * failed install the worker then fixed should not reject a task that is right
+ * by the end of it.
+ */
+async function readToolEvidence(file: string | undefined, maxBytes: number): Promise<string | undefined> {
+	if (!file) return undefined;
+	try {
+		const text = (await fs.readFile(file, "utf8")).trim();
+		return text ? truncateTail(text, maxBytes) : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 export function formatEvidence(task: { id: string; title: string; detail?: string }, evidence: Evidence): string {
@@ -344,6 +392,13 @@ export function formatEvidence(task: { id: string; title: string; detail?: strin
 	];
 	for (const command of evidence.commands) {
 		sections.push(`## Command: ${command.command}\nexit ${command.code}\n${command.output}`);
+	}
+	if (evidence.toolEvidence) {
+		sections.push(
+			"## Tool evidence recorded during the session\n" +
+				"Captured from the worker's tool calls as they ran — this is the tools' own output, not the worker's account of it.\n\n" +
+				evidence.toolEvidence,
+		);
 	}
 	return sections.join("\n\n");
 }

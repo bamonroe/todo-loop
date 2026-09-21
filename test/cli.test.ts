@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { after, before, test } from "node:test";
 import { promisify } from "node:util";
 import { workerArgs } from "../src/cli.ts";
+import { evidenceFilePath } from "../src/evidence.ts";
 import { DEFAULT_CONFIG, parseConfig } from "../src/config.ts";
 import { loadStore } from "../src/store.ts";
 
@@ -199,14 +200,14 @@ test("the prompt stays behind the -- separator, whatever it starts with", () => 
  */
 async function planningRound(
 	script: string,
-	options: { loop?: string; extraTasks?: string; atomic?: string } = {},
+	options: { loop?: string; extraTasks?: string; atomic?: string; verify?: string } = {},
 ): Promise<{ store: ReturnType<typeof loadStore>; stderr: string }> {
 	const repo = fs.mkdtempSync(path.join(os.tmpdir(), "todo-loop-round-"));
 	const bin = path.join(repo, "bin");
 	fs.mkdirSync(bin);
 	fs.writeFileSync(
 		path.join(repo, "todoloop.toml"),
-		`[models]\nworker = "ollama/fake"\nverifier = "ollama/fake"\n\n[loop]\ncheckpoint = "off"\n${options.loop ?? ""}${options.atomic ?? ""}`,
+		`[models]\nworker = "ollama/fake"\nverifier = "ollama/fake"\n\n[loop]\ncheckpoint = "off"\n${options.loop ?? ""}${options.atomic ?? ""}${options.verify ?? ""}`,
 	);
 	fs.writeFileSync(
 		path.join(repo, "todo.toml"),
@@ -306,11 +307,15 @@ test("the project section parses and filters junk", () => {
  * changes, timed out again and blocked the whole run. Promotion is exactly the
  * remedy, and it never fired: overflow was only ever set from a finished diff's
  * file count or from compaction, and a killed worker produces neither.
+ *
+ * `max_attempts = 1` so one rejection spends the budget: promotion waits for
+ * the attempts to run out, which is the whole of the test below this one.
  */
-test("an act that burns its whole budget is promoted rather than retried", async () => {
+test("an act that has spent its attempts and overran becomes a plan", async () => {
 	const { store, stderr } = await planningRound("sleep 5", {
 		loop: "worker_timeout_ms = 1500\n",
 		atomic: '\n[atomic]\non_overflow = "promote"\n',
+		verify: "\n[verify]\nmax_attempts = 1\n",
 		extraTasks: `\n[[task]]\nid = "eq.wire"\ntitle = "Wire the screen to the engine"\nparent = "eq"\nlevel = "act"\nkind = "code"\nstatus = "todo"\nattempts = 0\n`,
 	});
 
@@ -319,6 +324,60 @@ test("an act that burns its whole budget is promoted rather than retried", async
 	assert.equal(act?.status, "todo", "and goes back in the queue");
 	assert.equal(act?.attempts, 0, "with the failed attempt cleared — it is not the same task any more");
 	assert.match(stderr, /promoted to plan/);
+});
+
+/**
+ * Run 12. A scaffold was rejected once, for a reason that had nothing to do
+ * with its size, and because a Gradle/Compose scaffold inherently touches
+ * twelve files the single rejection converted a nearly-right task into a plan
+ * with two attempts unspent. One rejection is ordinary; three is the signal.
+ */
+test("one rejection does not promote an oversized act while attempts remain", async () => {
+	const { store, stderr } = await planningRound("sleep 5", {
+		loop: "worker_timeout_ms = 1500\n",
+		atomic: '\n[atomic]\non_overflow = "promote"\n',
+		verify: "\n[verify]\nmax_attempts = 3\n",
+		extraTasks: `\n[[task]]\nid = "eq.wire"\ntitle = "Wire the screen to the engine"\nparent = "eq"\nlevel = "act"\nkind = "code"\nstatus = "todo"\nattempts = 0\n`,
+	});
+
+	const act = store.tasks.find((t) => t.id === "eq.wire");
+	assert.equal(act?.overflowed, true, "the overrun is still recorded");
+	// "act" is the default level and is not written back, so absence is the assertion.
+	assert.notEqual(act?.level, "plan", "but the task keeps its remaining attempts");
+	assert.equal(act?.attempts, 1);
+	assert.ok(!/promoted to plan/.test(stderr));
+});
+
+/**
+ * An attempt must be judged on its own tool output. Without the truncate, the
+ * install a *rejected* attempt managed would still be sitting in the file when
+ * the retry is verified, and the retry would be credited with work it never did
+ * — the precise failure this channel exists to prevent, inverted.
+ */
+test("each session starts with an empty evidence file", async () => {
+	const repo = fs.mkdtempSync(path.join(os.tmpdir(), "todo-loop-stale-"));
+	const bin = path.join(repo, "bin");
+	fs.mkdirSync(bin);
+	fs.writeFileSync(
+		path.join(repo, "todoloop.toml"),
+		'[models]\nworker = "ollama/fake"\nverifier = "ollama/fake"\n\n[loop]\ncheckpoint = "off"\n',
+	);
+	fs.writeFileSync(
+		path.join(repo, "todo.toml"),
+		'[loop]\nrunning = false\ncurrent = ""\niterations = 0\n\n[[task]]\nid = "eq"\ntitle = "Build the equalizer"\nlevel = "plan"\nstatus = "todo"\nattempts = 0\n',
+	);
+	fs.writeFileSync(path.join(bin, "pi"), "#!/bin/sh\ntrue\n", { mode: 0o755 });
+
+	const evidence = evidenceFilePath(repo);
+	fs.writeFileSync(evidence, "### android_install\nInstalled by an attempt that was thrown away.\n");
+
+	await run("node", ["--experimental-strip-types", cli, "run", "--max", "1", "--cwd", repo], {
+		cwd: repo,
+		env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+	}).catch((error: unknown) => error);
+
+	assert.ok(!fs.readFileSync(evidence, "utf8").includes("thrown away"), "the previous attempt's evidence is gone");
+	fs.rmSync(evidence, { force: true });
 });
 
 test("the overrun is recorded even when on_overflow only warns", async () => {

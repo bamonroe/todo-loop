@@ -175,6 +175,33 @@ live: one turn emitted 4,948 output tokens and the next turn's input rose by
 4,082. And `promote` fired for the first time in any run. It fired on poisoned
 input, but the mechanism works.
 
+## Run 12: the verifier cannot see the worker's tools
+
+The documentation fix held — the docs act ran and verified, where run 11 died.
+Then the scaffold was rejected on its first attempt, and the reason was
+structural.
+
+The planning round wrote "finish by verifying android_install succeeds on the
+booted emulator" into the task. The worker did it. But the verifier reads the
+task, the diff and the output of `build_command` and `test_command` — the
+worker's tool calls happen inside a session it never sees. The only trace of the
+install was a sentence the worker had added to NOTES.md, and the verifier
+refused to take a claim as evidence. It was right to. Any task whose proof is a
+tool result rather than a build log was unverifiable by construction.
+
+Then `promote` compounded it. The rejection came with the twelve files a
+Gradle/Compose scaffold inherently touches, and failed-and-oversized promoted a
+nearly-right task into a plan with two attempts unspent. Breaking a scaffold
+down makes it strictly worse: no piece of a scaffold builds alone, so every
+child fails the gate its parent would have passed. Run 10 never saw this because
+`on_overflow` was `warn`; turning promote on is what exposed it.
+
+Both fixed. `verify.evidence_tools` names the tools whose results are recorded
+as they run and appended to the evidence, labelled as the tools' own output; the
+file lives outside the repository and is truncated before every session, so a
+rejected attempt's install can never be credited to its retry. And promotion now
+waits until the attempts are spent.
+
 ## Still open
 
 - **The project description contradicts Android.** It says the app adjusts

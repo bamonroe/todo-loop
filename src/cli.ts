@@ -19,7 +19,7 @@ import {
 	type Config,
 } from "./config.ts";
 import { diagnose, formatChecks } from "./doctor.ts";
-import { commitAll, gatherEvidence, headCommit, isGitRepo, isTreeClean, loopOwnedPaths, revertTo, runCommand } from "./evidence.ts";
+import { commitAll, evidenceFilePath, gatherEvidence, headCommit, isGitRepo, isTreeClean, loopOwnedPaths, revertTo, runCommand } from "./evidence.ts";
 import { renderAssignmentPrompt } from "./prompt.ts";
 import { maintainNotes } from "./notes.ts";
 import { checkPlanRound, type PlanVerdict } from "./plan.ts";
@@ -102,6 +102,15 @@ interface Env {
 	config: Config;
 	storeFile: string;
 	store: Store;
+	/**
+	 * Where the worker's session records results from `verify.evidence_tools`.
+	 *
+	 * One path for the whole driver process, truncated before each session, so an
+	 * attempt is always judged on its own tool output and never on the one that
+	 * was just reverted. Outside the repository on purpose: the checkpoint commit
+	 * is `git add -A`.
+	 */
+	evidenceFile: string;
 }
 
 function loadEnv(flags: Flags): Env {
@@ -115,7 +124,7 @@ function loadEnv(flags: Flags): Env {
 		str(flags, "model") || undefined,
 	);
 	const storeFile = resolveStorePath(cwd, str(flags, "file") || undefined);
-	return { cwd, config, storeFile, store: loadStore(storeFile) };
+	return { cwd, config, storeFile, store: loadStore(storeFile), evidenceFile: evidenceFilePath(cwd) };
 }
 
 /**
@@ -144,6 +153,7 @@ async function evidenceFor(env: Env) {
 		timeoutMs: env.config.verify.timeout_ms,
 		maxBytes: env.config.verify.max_evidence_bytes,
 		exclude: queueExcludes(env),
+		evidenceFile: env.evidenceFile,
 	});
 }
 
@@ -612,10 +622,18 @@ function runPi(env: Env, prompt: string, dryRun: boolean, budgetMs = 0): Promise
 		// every task verified and committed twice, then a failed attempt to
 		// replace a print mode session.
 		const budget = budgetMs;
+		// Start every session with an empty evidence file. Without the truncate a
+		// rejected attempt's install output would still be sitting there when the
+		// retry is judged, and the retry would be credited with work it did not do.
+		try {
+			fs.writeFileSync(env.evidenceFile, "");
+		} catch {
+			// Nothing to record into is the same as a worker that called no tools.
+		}
 		const child = spawn("pi", args, {
 			cwd: env.cwd,
 			stdio: ["ignore", "pipe", "inherit"],
-			env: { ...process.env, TODOLOOP_DRIVER: "shell" },
+			env: { ...process.env, TODOLOOP_DRIVER: "shell", TODOLOOP_EVIDENCE_FILE: env.evidenceFile },
 		});
 		let output = "";
 		child.stdout?.on("data", (chunk: Buffer) => {
@@ -877,23 +895,29 @@ async function runLoop(
 		// already judges those on what they landed.
 		if (result.timedOut && !planning) noteBudgetOverflow(env, live, budgetMs);
 
-		// A task that both overran its budget — files, compaction, or the clock —
-		// and failed verification is far more likely to be too big than to be
-		// nearly right. Retrying the same oversized prompt two more times just
-		// spends tokens confirming that.
-		if (
-			env.config.atomic.on_overflow === "promote" &&
-			live.overflowed &&
-			assignmentFor(live) === "act"
-		) {
-			promoteToPlan(env.store, live, `Promoted to plan: ${live.overflow_reason ?? "over budget"}`);
-			live.research_budget = researchBudgetOf(live, env.config.plan.research_budget);
-			persist();
-			console.error(`↑ ${live.id} promoted to plan — ${live.overflow_reason}; its next steps get decided next`);
-			continue;
-		}
-
+		// Out of attempts. An oversized task becomes a plan; anything else blocks.
+		//
+		// Held until here rather than acted on at the first rejection, which is
+		// how this was first written and is strictly worse. Run 12 rejected a
+		// scaffold once, for a reason that had nothing to do with its size — the
+		// task asked for evidence the verifier could not be shown — and because a
+		// Gradle/Compose scaffold inherently touches twelve files, that single
+		// rejection converted a nearly-right task into a plan with its other two
+		// attempts unspent. Breaking a scaffold into pieces then makes it worse:
+		// no piece of a scaffold builds on its own, so every child fails the gate
+		// its parent would have passed.
+		//
+		// One rejection is ordinary. Three rejections on a task that is also
+		// oversized is the signal — that is when retrying the same oversized
+		// prompt has stopped being worth the tokens.
 		if (attempts >= env.config.verify.max_attempts) {
+			if (env.config.atomic.on_overflow === "promote" && live.overflowed && assignmentFor(live) === "act") {
+				promoteToPlan(env.store, live, `Promoted to plan: ${live.overflow_reason ?? "over budget"}`);
+				live.research_budget = researchBudgetOf(live, env.config.plan.research_budget);
+				persist();
+				console.error(`↑ ${live.id} promoted to plan — ${live.overflow_reason}; its next steps get decided next`);
+				continue;
+			}
 			markBlocked(env.store, live, `Blocked after ${attempts} attempts: ${verdict.reason}`);
 			persist();
 			console.error("halting: a task the worker cannot finish should not become an unbounded token burn");

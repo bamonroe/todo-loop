@@ -236,7 +236,10 @@ in `.pi/extensions/`.
    build that was already broken — or that has no project to run against yet —
    rejects work that was correct.
 3. The verifier model gets the task text, the changed files, the diff, and the
-   command output. `todo.toml` and `todoloop.toml` are excluded from that diff —
+   command output — plus, for any tool named in `verify.evidence_tools`, that
+   tool's own output as it ran. Without that last channel a task whose proof is
+   a tool result rather than a build log cannot be verified at all: the worker
+   can only claim it, and a claim is not evidence. `todo.toml` and `todoloop.toml` are excluded from that diff —
    the loop's own bookkeeping changes on every task, and showing it to the
    verifier makes a task that touched nothing else look like it did something. It does **not** get the conversation or the worker's summary.
    It answers one narrow question — does this diff do what the task asked? — as

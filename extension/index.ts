@@ -14,7 +14,7 @@
  * Load with:  pi -e /path/to/todo-loop/extension/index.ts
  */
 
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { uuidv7, type Usage } from "@earendil-works/pi-ai";
@@ -24,6 +24,7 @@ import { DEFAULT_CONFIG, inheritsWorker, loadConfig, splitModelRef, type Config 
 import {
 	changedFiles,
 	commitAll,
+	evidenceFilePath,
 	gatherEvidence,
 	headCommit,
 	isGitRepo,
@@ -157,6 +158,43 @@ export default function (pi: ExtensionAPI) {
 	/** Usage from the most recent nested verifier call, reported back on the tool result. */
 	let lastVerifierUsage: Usage | undefined;
 	let spillDir: string | undefined;
+	let evidenceFile: string | undefined;
+
+	/**
+	 * Where results from `verify.evidence_tools` are written for the verifier.
+	 *
+	 * Under the shell driver the path comes from the environment, because the
+	 * driver has to read the file after this session has exited and it truncates
+	 * it before every attempt — so a rejected attempt's evidence never props up
+	 * the next one. In-session verification has no such handoff and picks its own
+	 * path. Deliberately outside the repository: `commitAll` is `git add -A`, and
+	 * evidence about a task has no business being committed as part of it.
+	 */
+	const evidencePath = (): string => {
+		evidenceFile = evidenceFile ?? process.env.TODOLOOP_EVIDENCE_FILE ?? evidenceFilePath(cwd);
+		return evidenceFile;
+	};
+
+	/**
+	 * Record a tool result the verifier would otherwise never see.
+	 *
+	 * Appended as it happens rather than gathered at the end: the worker may call
+	 * a tool several times, and the run that mattered is not always the last one.
+	 * Capped per entry for the same reason every other channel is — the verifier
+	 * reads this, and an unbounded lint report would crowd out the diff.
+	 */
+	const recordEvidence = (toolName: string, text: string | undefined): void => {
+		if (!text || !config.verify.evidence_tools.includes(toolName)) return;
+		try {
+			appendFileSync(
+				evidencePath(),
+				`### ${toolName}\n${truncateTail(text, config.context.tool_output_max_bytes)}\n\n`,
+			);
+		} catch {
+			// A verifier that sees less evidence is a worse verifier, not a broken
+			// one. Never fail the worker's tool call over the bookkeeping.
+		}
+	};
 	/** Inspection calls this planning round has spent, and whose round they belong to. */
 	let looks = { taskId: "", count: 0 };
 
@@ -228,6 +266,9 @@ export default function (pi: ExtensionAPI) {
 			timeoutMs: config.verify.timeout_ms,
 			maxBytes: config.verify.max_evidence_bytes,
 			exclude: ownedPaths(store),
+			// Only set once a recorded tool has actually run, so a session that
+			// called none reads no file at all.
+			evidenceFile,
 		});
 
 		// A round is judged entirely by tooling — no model, no network, no cost.
@@ -956,6 +997,9 @@ export default function (pi: ExtensionAPI) {
 
 		const nudge = spendLook(store, event.toolName);
 		const text = textOf(event.content);
+		// Before the early return below: a tool whose output is small and whose
+		// budget is unspent still has to reach the verifier.
+		recordEvidence(event.toolName, text);
 		const max = config.context.tool_output_max_bytes;
 		const oversize = BULKY_TOOLS.has(event.toolName) && !!text && Buffer.byteLength(text, "utf8") > max;
 		if (!nudge && !oversize) return;
