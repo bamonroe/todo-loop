@@ -19,6 +19,7 @@ import {
 	type Config,
 } from "./config.ts";
 import { diagnose, formatChecks } from "./doctor.ts";
+import { clockTime, describePhases, formatDuration, stampConsole } from "./clock.ts";
 import { describeTelemetry, emptyTelemetry, SessionMonitor, type RunTelemetry } from "./events.ts";
 import { commitAll, evidenceFilePath, gatherEvidence, headCommit, isGitRepo, isTreeClean, loopOwnedPaths, revertTo, runCommand } from "./evidence.ts";
 import { renderAssignmentPrompt } from "./prompt.ts";
@@ -741,6 +742,19 @@ function runPi(env: Env, prompt: string, dryRun: boolean, budgetMs = 0): Promise
 async function commandRun(env: Env, flags: Flags): Promise<number> {
 	const dryRun = bool(flags, "dry-run");
 	const maxIterations = Number(str(flags, "max", String(env.config.loop.max_iterations))) || 1;
+	// Every line from here to teardown carries the time it was written. The
+	// gaps between the worker's own tool lines are what say where a session
+	// went, and until now nothing in the log could be subtracted from anything.
+	const unstamp = stampConsole();
+	try {
+		return await timedRun(env, flags, dryRun, maxIterations);
+	} finally {
+		unstamp();
+	}
+}
+
+async function timedRun(env: Env, flags: Flags, dryRun: boolean, maxIterations: number): Promise<number> {
+	const runStarted = Date.now();
 
 	// A dry run walks the queue in memory and writes nothing. Marking every task
 	// done — or committing whatever happens to be in the tree — is not what
@@ -772,6 +786,7 @@ async function commandRun(env: Env, flags: Flags): Promise<number> {
 	try {
 		return await runLoop(env, flags, dryRun, maxIterations, persist, refresh);
 	} finally {
+		console.log(`[todo-loop] run finished after ${formatDuration(Date.now() - runStarted)} (started ${clockTime(runStarted)})`);
 		// Teardown runs on every exit — clean, error, or thrown — and its own
 		// failure is only reported. The kill-the-driver habit means orphaned
 		// infrastructure is the common case, not the odd one.
@@ -862,7 +877,13 @@ async function runLoop(
 		const kind = planning ? "plan next steps for" : `${kindOf(task)}`;
 		console.log(`\n=== [${iteration}/${maxIterations}] ${kind} — ${task.id}: ${task.title} ===`);
 		const budgetMs = planning ? env.config.loop.plan_timeout_ms : env.config.loop.worker_timeout_ms;
+		// Three clocks, because "the iteration took 31 minutes" is not an
+		// actionable sentence. The worker's share is the one a bigger budget or
+		// a faster model moves; the verifier's is a network call that a local
+		// model would trade for VRAM; the rest is the build and the tests.
+		const attemptStarted = Date.now();
 		const result = await runPi(env, prompt, dryRun, budgetMs);
+		const workerMs = Date.now() - attemptStarted;
 		// Printed on every session, not only the ones that overran. A run's
 		// budget overruns are only legible against what an ordinary session
 		// costs, and run 13 recorded neither.
@@ -901,6 +922,13 @@ async function runLoop(
 				: planning
 					? await timedOutRound(env, current, budgetMs)
 					: { pass: false, reason: `Worker exceeded its ${budgetMs}ms budget${cost ? ` (${cost})` : ""}.` };
+		// A timed-out act never reaches a verifier, so it has no verify phase to
+		// report — undefined rather than a misleading zero.
+		const verifyMs = result.timedOut && !planning ? undefined : Date.now() - attemptStarted - workerMs;
+		const timing = `${formatDuration(Date.now() - attemptStarted)} (${describePhases([
+			["worker", workerMs],
+			["verify", verifyMs],
+		])})`;
 		// A planning round's check reloads the store to see the rows the worker
 		// wrote, so anything held across that call now points at a discarded copy
 		// of the queue. Re-find before mutating: every write from here down —
@@ -930,7 +958,7 @@ async function runLoop(
 				env.store.loop.last_failure = "";
 				persist();
 				if (!dryRun) await checkpoint(env, live, verdict.reason);
-				console.log(`✓ ${live.id} planned — ${verdict.reason}`);
+				console.log(`✓ ${live.id} planned in ${timing} — ${verdict.reason}`);
 				continue;
 			}
 
@@ -938,12 +966,12 @@ async function runLoop(
 			persist();
 			if (!dryRun) await checkpoint(env, live, live.summary ?? "");
 
-			console.log(`✓ ${live.id} verified`);
+			console.log(`✓ ${live.id} verified in ${timing}`);
 			continue;
 		}
 
 		const attempts = recordFailure(env.store, live, verdict.reason);
-		console.error(`✗ ${live.id} rejected (attempt ${attempts}/${env.config.verify.max_attempts}): ${verdict.reason}`);
+		console.error(`✗ ${live.id} rejected (attempt ${attempts}/${env.config.verify.max_attempts}) after ${timing}: ${verdict.reason}`);
 
 		// A cut-off round that was *also* rejected on its merits leaves a half
 		// batch that broke a rule. That is not salvage, so it goes — but only

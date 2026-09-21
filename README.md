@@ -251,6 +251,33 @@ the last only while a plan is being worked.
 To load it permanently, add it to `~/.pi/agent/settings.json` or drop a symlink
 in `.pi/extensions/`.
 
+## Reading the run log
+
+Every line the driver prints carries the local time it was written, and each
+iteration closes with where its time went:
+
+```
+[13:16:33] === [5/50] code — eq.equalizer-interface: EqualizerController ===
+[13:16:41]   → treesitter_outline app/src/main/java/dev/bam/equalizer
+[13:17:02]   → android_api android.media.audiofx.Equalizer#setBandLevel
+...
+[13:46:33] ✗ eq.equalizer-interface rejected (attempt 1/3) after 30m01s
+           (worker 30m00s): Worker exceeded its 1800000ms budget.
+```
+
+The stamps are on the worker's own tool lines too, so the gap between two of
+them is what that call cost — which is the only way to tell a session lost to
+one enormous generation from one lost to two hundred small ones. Absolute time
+rather than elapsed, because it is what lines the log up against `git log`, the
+emulator and docker.
+
+The closing line splits the iteration into `worker` and `verify`. A timed-out
+act reports no `verify` phase at all rather than a zero: it never reached one.
+Run 13's post-mortem had to reconstruct all of this from commit timestamps,
+which exist only where a task was verified and committed — so every rejected
+iteration, every timeout, and everything happening *inside* an iteration was
+invisible.
+
 ## How a task closes
 
 1. The worker calls `todo_complete` with a one-line summary.
