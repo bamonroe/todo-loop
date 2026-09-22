@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { after, before, test } from "node:test";
 import {
 	changedFiles,
+	dirtyPaths,
 	collectDiff,
 	commitAll,
 	formatEvidence,
@@ -500,4 +501,13 @@ test("the build and test commands run in the environment the caller declared", a
 	const build = evidence.commands.find((command) => command.command.includes("TODOLOOP_TEST_VAR"));
 	assert.ok(build, "the build command ran");
 	assert.match(build.output, /\[declared\]/);
+});
+
+test("dirtyPaths names what is dirty, minus what the caller owns", async () => {
+	fs.writeFileSync(path.join(repo, "server.ts"), "changed again\n");
+	fs.writeFileSync(path.join(repo, "todo.toml"), '[loop]\nrunning = true\n');
+	const paths = await dirtyPaths(repo);
+	assert.ok(paths.includes("server.ts"));
+	assert.ok(paths.includes("todo.toml"));
+	assert.ok(!(await dirtyPaths(repo, ["todo.toml"])).includes("todo.toml"), "the queue is the loop's own churn");
 });

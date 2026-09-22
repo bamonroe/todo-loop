@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -623,4 +623,49 @@ test("the retry is handed the tree and the thoughts of the attempt before it", a
 	assert.match(retry, /still in the working tree/);
 	assert.match(retry, /decompiling the Compose jar by hand is a dead end/);
 	assert.doesNotMatch(prompts[0]!, /What the last attempt left you/, "the first attempt inherits nothing");
+});
+
+test("asking for help never starts a run", async () => {
+	// `todo run --help` used to start a real fifty-iteration loop: help was
+	// checked as a command and ignored as a flag. It cost a queue reset.
+	for (const flag of ["--help", "-h"]) {
+		const result = await todo("run", flag);
+		assert.equal(result.code, 0, `${flag} exits clean`);
+		assert.match(result.stdout, /todo — autonomous todo loop/);
+		assert.doesNotMatch(result.stdout + result.stderr, /iteration|plan next steps/i, `${flag} started a run`);
+	}
+});
+
+test("a refusal to start on a dirty tree says which files and what to do", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "todo-loop-dirty-"));
+	try {
+		execFileSync("git", ["init", "-q"], { cwd: dir });
+		execFileSync("git", ["config", "user.email", "t@example.com"], { cwd: dir });
+		execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+		fs.writeFileSync(path.join(dir, "seed.txt"), "one\n");
+		execFileSync("git", ["add", "-A"], { cwd: dir });
+		execFileSync("git", ["commit", "-qm", "seed"], { cwd: dir });
+		fs.writeFileSync(path.join(dir, "seed.txt"), "two\n");
+		fs.writeFileSync(path.join(dir, "stray.kt"), "fun main() {}\n");
+		fs.writeFileSync(
+			path.join(dir, "todoloop.toml"),
+			'[verify]\nenabled = false\n[loop]\ncheckpoint = "require-clean"\n',
+		);
+		fs.writeFileSync(
+			path.join(dir, "todo.toml"),
+			'[loop]\nrunning = false\n\n[[task]]\nid = "a"\ntitle = "Do the thing"\n',
+		);
+
+		const { stderr } = await run("node", ["--experimental-strip-types", cli, "run", "--cwd", dir, "--max", "1"], {
+			cwd: dir,
+		}).catch((error: { stderr?: string }) => ({ stderr: error.stderr ?? "" }));
+
+		assert.match(stderr, /working tree is dirty/);
+		assert.match(stderr, /seed\.txt/, "names what is actually dirty");
+		assert.match(stderr, /stray\.kt/);
+		assert.match(stderr, /git checkout -- \./, "and what to do about it");
+		assert.match(stderr, /checkpoint = "commit"/);
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
 });

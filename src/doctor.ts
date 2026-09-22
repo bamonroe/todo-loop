@@ -512,6 +512,27 @@ export function envChecks(config: Config, exists: (path: string) => boolean = fs
 	return checks;
 }
 
+/**
+ * Acts carrying their own file budget.
+ *
+ * Visible on purpose. A per-task budget is a claim a planner made about work
+ * that is inherently wide, and the failure mode is not the one wide act — it is
+ * the budget quietly becoming how every act avoids being called too coarse. One
+ * or two in a queue is the feature working; a handful is a planner that has
+ * found the escape hatch.
+ */
+export function budgetChecks(store: Store, config: Config): Check[] {
+	const raised = store.tasks.filter((task) => !task.archived && task.max_files);
+	if (!raised.length) return [];
+	return [
+		{
+			level: raised.length > 2 ? "warn" : "ok",
+			label: "file budgets",
+			detail: `${raised.map((task) => `${task.id}=${task.max_files}`).join(", ")} (project default ${config.atomic.max_files})`,
+		},
+	];
+}
+
 export async function diagnose(options: DoctorOptions): Promise<Check[]> {
 	const { cwd, config, store } = options;
 	const checks: Check[] = [];
@@ -557,6 +578,7 @@ export async function diagnose(options: DoctorOptions): Promise<Check[]> {
 				},
 	);
 
+	checks.push(...budgetChecks(store, config));
 	checks.push(...envChecks(config));
 
 	checks.push(...auditQueue(store));

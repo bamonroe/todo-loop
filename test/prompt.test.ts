@@ -609,3 +609,15 @@ test("a planning round gets the clarification, not the whole argument", () => {
 	assert.doesNotMatch(prompt, /What a turn actually costs/);
 	assert.match(prompt, /That limit is about what a planning round is \*for\*, not about what a tool costs/);
 });
+
+test("a planner is told the file budget can move, and that moving it is rare", () => {
+	const prompt = renderPlanPrompt(store, store.tasks[0], { mode: "tool" });
+	assert.match(prompt, /max_files/);
+	assert.match(prompt, /a project scaffold, a rename across every call site/);
+	assert.match(prompt, /a second time in one round/, "the guard against it becoming habit");
+});
+
+test("an act hears its own budget, not the project's", () => {
+	assert.match(renderActPrompt(store, task, { mode: "tool", maxFiles: 13 }), /roughly 13 files at most/);
+	assert.match(renderActPrompt(store, task, { mode: "tool" }), /roughly 5 files at most/);
+});

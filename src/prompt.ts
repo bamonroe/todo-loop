@@ -108,6 +108,8 @@ function atomicityRules(maxFiles: number): string {
 		"- **Verifiable from the diff alone.** A reviewer who sees only the diff and the text must be able to tell whether it was done.",
 		"",
 		"Err on the side of smaller. Two acts that are too small cost one extra session; one act that is too big fails verification repeatedly and stalls the queue.",
+		"",
+		`Some work is wide and still one thing — a project scaffold, a rename across every call site. Where that is genuinely true, give the act its own \`max_files\` and say in the detail why the work cannot be narrower. It is rare: if you are reaching for it a second time in one round, the items are too big, not the budget too small.`,
 	].join("\n");
 }
 

@@ -4,6 +4,8 @@ import {
 	discardChildren,
 	childrenOf,
 	counts,
+	fileBudgetOf,
+	isPromotable,
 	isLeaf,
 	markBlocked,
 	markDoing,
@@ -16,6 +18,7 @@ import {
 	renderTree,
 	rollup,
 	serializeStore,
+	type Task,
 } from "../src/store.ts";
 
 const sample = `
@@ -271,4 +274,35 @@ test("promotion drops it, since nobody will implement that act now", () => {
 	promoteToPlan(store, store.tasks[0], "too big");
 	assert.equal(store.tasks[0].interrupted_thinking, undefined);
 	assert.equal(store.loop.carried, "");
+});
+
+test("an act may carry its own file budget, and only an act", () => {
+	// A scaffold is wide and still one thing: run 14's touched thirteen files
+	// and 444 lines, built green, and was stamped too coarse anyway.
+	assert.equal(fileBudgetOf({ id: "a", title: "a", status: "todo", attempts: 0 }, 5), 5);
+	assert.equal(fileBudgetOf({ id: "a", title: "a", status: "todo", attempts: 0, max_files: 14 }, 5), 14);
+	// A zero or negative budget would make every act overflow, including the
+	// one-file ones, so it falls back rather than being honoured.
+	assert.equal(fileBudgetOf({ id: "a", title: "a", status: "todo", attempts: 0, max_files: 0 }, 5), 5);
+
+	const store = parseStore(`
+[[task]]
+id = "wide"
+title = "Scaffold the project"
+max_files = 13
+`);
+	assert.equal(store.tasks[0].max_files, 13, "it survives a parse");
+	assert.match(serializeStore(store), /max_files = 13/, "and a write, so the number stays visible in the queue");
+});
+
+test("only a code act is broken into children when it overruns", () => {
+	const act = (kind?: string): Task =>
+		({ id: "a", title: "a", status: "todo", attempts: 0, kind }) as Task;
+	assert.equal(isPromotable(act()), true, "a code act is the whole point of promotion");
+	assert.equal(isPromotable(act("code")), true);
+	// Breaking a one-file note into children produces children that each write
+	// part of a file. Run 11 halted on exactly that cascade.
+	assert.equal(isPromotable(act("docs")), false);
+	assert.equal(isPromotable(act("research")), false);
+	assert.equal(isPromotable({ id: "a", title: "a", status: "todo", attempts: 0, level: "plan" } as Task), false);
 });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseConfig } from "../src/config.ts";
-import { auditQueue, envChecks, formatChecks, modelChecks, type Check } from "../src/doctor.ts";
+import { auditQueue, budgetChecks, envChecks, formatChecks, modelChecks, type Check } from "../src/doctor.ts";
 import { parseStore } from "../src/store.ts";
 
 function levelOf(checks: Check[], label: string): string | undefined {
@@ -288,4 +288,15 @@ test("doctor says what the project env will and will not do", () => {
 	assert.equal(missing.length, 1);
 	assert.match(missing[0].detail, /ROOT=\/gone/);
 	assert.doesNotMatch(missing[0].detail, /LABEL/, "a value that is not a path is not a path that is missing");
+});
+
+test("doctor makes a raised file budget visible", () => {
+	const config = parseConfig("");
+	const quiet = budgetChecks(parseStore('[[task]]\nid = "a"\ntitle = "Do it"\n'), config);
+	assert.deepEqual(quiet, [], "nothing to say when nobody raised one");
+
+	const store = parseStore(['[[task]]', 'id = "a"', 'title = "Scaffold"', "max_files = 13"].join("\n"));
+	const checks = budgetChecks(store, config);
+	assert.equal(levelOf(checks, "file budgets"), "ok");
+	assert.match(detailOf(checks, "file budgets") ?? "", /a=13/);
 });

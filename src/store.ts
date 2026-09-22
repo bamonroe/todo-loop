@@ -113,6 +113,23 @@ export interface Task {
 	/** Why `overflowed` was set — shown in status and doctor. */
 	overflow_reason?: string;
 	/**
+	 * This act's own file budget, overriding `atomic.max_files`.
+	 *
+	 * The budget is a proxy for "was this one thing", and it is a good proxy
+	 * until it meets work that is inherently wide. A project scaffold is the
+	 * standing example: run 14's touched thirteen files and 444 lines, was
+	 * correct, built green, and was still stamped "too coarse" — and had it
+	 * failed three times instead, promotion would have cut it into children
+	 * that each fail the build gate their parent would have passed, because no
+	 * piece of a scaffold builds on its own.
+	 *
+	 * Set by the planner that writes the act, because that is who knows. It is
+	 * a claim, not an exemption: the number is in the queue, the verifier still
+	 * judges the diff, and `todo doctor` lists every task carrying one so a
+	 * planner that starts reaching for it habitually is visible.
+	 */
+	max_files?: number;
+	/**
 	 * Every verdict this task has been rejected with, oldest first.
 	 *
 	 * Kept in full rather than as the latest one. Three attempts against the same
@@ -184,7 +201,7 @@ const BOOKKEEPING = [
 ];
 
 /** Keys `Task` models directly, and which therefore never belong in `extra`. */
-const MODELLED = ["id", "title", "status", "level", "kind", "research_budget", "parent", ...BOOKKEEPING];
+const MODELLED = ["id", "title", "status", "level", "kind", "research_budget", "max_files", "parent", ...BOOKKEEPING];
 
 /** Level words the loop understands as its own and therefore never preserves verbatim. */
 const OWN_LEVELS = new Set<string>(LEVELS);
@@ -350,6 +367,8 @@ function readTask(raw: TomlTable, schema: Schema, archived: boolean): Task | und
 	}
 	if (raw.kind !== undefined) task.kind = asActKind(raw.kind);
 	if (typeof raw.research_budget === "number") task.research_budget = Math.max(0, Math.trunc(raw.research_budget));
+	const maxFiles = asNumber(raw.max_files);
+	if (maxFiles > 0) task.max_files = Math.trunc(maxFiles);
 	if (raw.overflowed === true) task.overflowed = true;
 	const overflowReason = asString(raw.overflow_reason);
 	if (overflowReason) task.overflow_reason = overflowReason;
@@ -512,6 +531,7 @@ function taskTable(task: Task, schema: Schema): TomlTable {
 		setOrDelete(values, "done_at", task.done_at);
 		setOrDelete(values, "summary", task.summary);
 		setOrDelete(values, "reason", task.reason);
+		setOrDelete(values, "max_files", task.max_files);
 		setOrDelete(values, "overflowed", task.overflowed ? true : undefined);
 		setOrDelete(values, "overflow_reason", task.overflow_reason);
 		if (task.rejections?.length) values.rejections = [...task.rejections];
@@ -950,6 +970,8 @@ export interface NewTask {
 	kind?: ActKind;
 	/** Rounds this branch may still close with research alone. Plans only. */
 	research_budget?: number;
+	/** This act's own file budget, where `atomic.max_files` is wrong for it. Acts only. */
+	max_files?: number;
 	/** Project-schema metadata. Ignored by a schema that has no field for it. */
 	category?: string;
 	urgency?: string;
@@ -981,6 +1003,9 @@ export function createTask(store: Store, fields: NewTask): Task {
 	if (fields.parent) task.parent = fields.parent;
 	if (fields.level) task.level = fields.level;
 	if (fields.level !== "plan" && fields.kind) task.kind = fields.kind;
+	if (fields.level !== "plan" && fields.max_files !== undefined && fields.max_files > 0) {
+		task.max_files = Math.trunc(fields.max_files);
+	}
 	if (fields.level === "plan" && fields.research_budget !== undefined) {
 		task.research_budget = Math.max(0, Math.trunc(fields.research_budget));
 	}
@@ -1075,6 +1100,35 @@ export function recordFailure(store: Store, task: Task, reason: string): number 
 export function markOverflow(task: Task, reason: string): void {
 	task.overflowed = true;
 	task.overflow_reason = reason;
+}
+
+/**
+ * The file budget this task is actually judged against.
+ *
+ * A planner may raise it for work that is inherently wide; everything else
+ * takes the project's. Never lowers below 1 — a budget of zero would make
+ * every act overflow, including the ones that changed one file.
+ */
+export function fileBudgetOf(task: Task, configured: number): number {
+	const own = task.max_files;
+	return own && own > 0 ? Math.max(1, Math.trunc(own)) : configured;
+}
+
+/**
+ * Whether an over-budget task should be broken into children rather than
+ * blocked.
+ *
+ * Only a code act. Promotion answers one question — "was this too much work
+ * for one session" — and for a docs or research act the answer is never yes in
+ * a way children fix. Breaking a one-file note into pieces produces pieces that
+ * each write part of a file, and breaking a research act produces sub-questions
+ * nobody asked. Run 11 is the case: a documentation act got scaffolded into
+ * twelve files by a retry, which made it both failed and oversized, which is
+ * exactly the precondition for promotion. `cf477d7` stopped the diff from being
+ * built at all; this stops the promotion even if something else marks it.
+ */
+export function isPromotable(task: Task): boolean {
+	return assignmentFor(task) === "act" && kindOf(task) === "code";
 }
 
 /**

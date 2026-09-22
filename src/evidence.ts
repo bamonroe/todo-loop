@@ -175,6 +175,20 @@ export async function isTreeClean(cwd: string, ignore: string[] = []): Promise<b
 	return lines.every((line) => ignored.has(statusPath(line)));
 }
 
+/**
+ * What is actually dirty, for a message that can be acted on.
+ *
+ * `isTreeClean` answers yes or no, which is all the loop needs to decide and
+ * none of what a person needs at six in the morning when the run refused to
+ * start. Same exclusions, same parsing, so the two can never disagree about
+ * which files count.
+ */
+export async function dirtyPaths(cwd: string, ignore: string[] = []): Promise<string[]> {
+	const lines = (await git(cwd, ["status", "--porcelain"])).split("\n").filter((line) => line.trim());
+	const ignored = new Set(ignore);
+	return lines.map(statusPath).filter((path) => !ignored.has(path));
+}
+
 /** The path a --porcelain line refers to; a rename reports "old -> new". */
 function statusPath(line: string): string {
 	const body = line.slice(3).trim();

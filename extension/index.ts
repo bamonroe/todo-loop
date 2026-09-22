@@ -53,6 +53,8 @@ import {
 	markOverflow,
 	nextReady,
 	parentOf,
+	fileBudgetOf,
+	isPromotable,
 	promoteToPlan,
 	researchBudgetOf,
 	unfinishedChildren,
@@ -307,8 +309,9 @@ export default function (pi: ExtensionAPI) {
 			markOverflow(task, "context compaction fired inside a single task");
 			return;
 		}
-		if (files.length > config.atomic.max_files) {
-			markOverflow(task, `touched ${files.length} files (budget ${config.atomic.max_files})`);
+		const budget = fileBudgetOf(task, config.atomic.max_files);
+		if (files.length > budget) {
+			markOverflow(task, `touched ${files.length} files (${task.max_files ? "its own budget" : "budget"} ${budget})`);
 		}
 	};
 
@@ -367,7 +370,7 @@ export default function (pi: ExtensionAPI) {
 			rejections: task.rejections,
 			attempts: task.attempts,
 			maxAttempts: config.verify.max_attempts,
-			maxFiles: config.atomic.max_files,
+			maxFiles: fileBudgetOf(task, config.atomic.max_files),
 			maxChildren: config.plan.max_children,
 			researchBudget: researchBudgetOf(task, config.plan.research_budget),
 			lookBudget: config.plan.look_budget,
@@ -571,11 +574,7 @@ export default function (pi: ExtensionAPI) {
 			// Failed *and* over budget is much more likely to be a task that was
 			// never atomic than a worker that nearly got there. Break it down
 			// instead of spending two more attempts proving the same point.
-			if (
-				config.atomic.on_overflow === "promote" &&
-				task.overflowed &&
-				assignmentFor(task) === "act"
-			) {
+			if (config.atomic.on_overflow === "promote" && task.overflowed && isPromotable(task)) {
 				promoteToPlan(store, task, `Promoted to plan: ${task.overflow_reason ?? "over budget"}`);
 				task.research_budget = researchBudgetOf(task, config.plan.research_budget);
 				write(store);
@@ -746,6 +745,12 @@ export default function (pi: ExtensionAPI) {
 					description: "What an act produces. Ignored for a plan. Defaults to code.",
 				}),
 			),
+			max_files: Type.Optional(
+				Type.Number({
+					description:
+						"Only for an act whose work is inherently wide — a project scaffold, a rename across call sites. The file count above which this act is recorded as too coarse, replacing the project default. State why in the detail; the number is visible in the queue and the diff is still judged on its merits.",
+				}),
+			),
 			id: Type.Optional(Type.String({ description: "Explicit id. Defaults to a slug of the title." })),
 		}),
 
@@ -830,6 +835,7 @@ export default function (pi: ExtensionAPI) {
 				kind: level === "act" ? kind : undefined,
 				// Inherited, never refreshed — see Task.research_budget.
 				research_budget: level === "plan" ? researchBudgetOf(parent, config.plan.research_budget) : undefined,
+				max_files: level === "act" ? params.max_files : undefined,
 			});
 
 			insertChildren(store, parent.id, [child]);
@@ -842,6 +848,9 @@ export default function (pi: ExtensionAPI) {
 			// iterations on one dead end, and nothing in the queue or in any
 			// tool result ever said the work was already there.
 			const notes: string[] = [];
+			if (child.max_files) {
+				notes.push(`Its file budget is ${child.max_files}, not the project's ${config.atomic.max_files}.`);
+			}
 			if (!id.endsWith(wanted)) {
 				notes.push(`Note that ${parent.id}.${wanted} was taken, so this went in as ${id}.`);
 			}

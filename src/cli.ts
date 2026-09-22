@@ -23,7 +23,18 @@ import {
 import { diagnose, formatChecks } from "./doctor.ts";
 import { clockTime, describePhases, formatDuration, stampConsole } from "./clock.ts";
 import { describeTelemetry, emptyTelemetry, SessionMonitor, type RunTelemetry } from "./events.ts";
-import { commitAll, evidenceFilePath, gatherEvidence, headCommit, isGitRepo, isTreeClean, loopOwnedPaths, revertTo, runCommand } from "./evidence.ts";
+import {
+	commitAll,
+	dirtyPaths,
+	evidenceFilePath,
+	gatherEvidence,
+	headCommit,
+	isGitRepo,
+	isTreeClean,
+	loopOwnedPaths,
+	revertTo,
+	runCommand,
+} from "./evidence.ts";
 import { renderAssignmentPrompt } from "./prompt.ts";
 import { maintainNotes } from "./notes.ts";
 import { checkPlanRound, type PlanVerdict } from "./plan.ts";
@@ -41,6 +52,8 @@ import {
 	levelOf,
 	markOverflow,
 	kindOf,
+	fileBudgetOf,
+	isPromotable,
 	promoteToPlan,
 	researchBudgetOf,
 	unfinishedChildren,
@@ -212,8 +225,12 @@ async function timedOutRound(env: Env, task: Task, budgetMs: number): Promise<Pl
  */
 function noteOverflow(env: Env, task: Task, files: string[]): void {
 	if (env.config.atomic.on_overflow === "off") return;
-	if (files.length <= env.config.atomic.max_files) return;
-	markOverflow(task, `touched ${files.length} files (budget ${env.config.atomic.max_files})`);
+	const budget = fileBudgetOf(task, env.config.atomic.max_files);
+	if (files.length <= budget) return;
+	// Name whose budget it was. A task that set its own and blew through it
+	// anyway is a different finding from one that simply ran past the project's.
+	const whose = task.max_files ? "its own budget" : "budget";
+	markOverflow(task, `touched ${files.length} files (${whose} ${budget})`);
 }
 
 /**
@@ -250,7 +267,7 @@ const USAGE = `todo — autonomous todo loop for pi
   todo next [--id]               Print the next task's prompt (exit 3 when empty)
   todo start                     Claim the next task and print its prompt
   todo add <id> <title...>       Append an item (--detail "...", --parent <id>, --level act|plan,
-                                --kind code|docs|research,
+                                --kind code|docs|research, --max-files <n>,
                                  --category <c>, --urgency <u> where the schema has them)
   todo done <id> [summary...]    Mark done without verifying
   todo block <id> <reason...>    Mark blocked
@@ -361,7 +378,7 @@ function commandNext(env: Env, flags: Flags): number {
 			rejections: task.rejections,
 			attempts: task.attempts,
 			maxAttempts: env.config.verify.max_attempts,
-			maxFiles: env.config.atomic.max_files,
+			maxFiles: fileBudgetOf(task, env.config.atomic.max_files),
 			maxChildren: env.config.plan.max_children,
 			researchBudget: researchBudgetOf(task, env.config.plan.research_budget),
 			lookBudget: env.config.plan.look_budget,
@@ -415,6 +432,7 @@ function commandAdd(env: Env, flags: Flags): number {
 		kind: levelRaw === "act" ? kindRaw : undefined,
 		category: str(flags, "category") || undefined,
 		urgency: str(flags, "urgency") || undefined,
+		max_files: Number(str(flags, "max-files", "0")) || undefined,
 	});
 
 	const parent = str(flags, "parent");
@@ -857,7 +875,14 @@ async function runLoop(
 		// work, and refusing to start on it would turn the carry into a halt.
 		const carried = env.store.loop.carried === task.id;
 		if (env.config.loop.checkpoint === "require-clean" && !carried && !(await isTreeClean(env.cwd, queueExcludes(env)))) {
-			console.error("working tree is dirty and checkpoint = require-clean; refusing to start a task");
+			const dirty = await dirtyPaths(env.cwd, queueExcludes(env));
+			const listed = dirty.slice(0, 10).join(", ") + (dirty.length > 10 ? `, and ${dirty.length - 10} more` : "");
+			console.error(
+				`working tree is dirty and checkpoint = require-clean; refusing to start a task.\n` +
+					`  changed: ${listed}\n` +
+					`  commit it if it is work worth keeping, \`git checkout -- .\` if it is not,\n` +
+					`  or set loop.checkpoint = "commit" to let the loop sweep it into the next task's commit.`,
+			);
 			env.store.loop.running = false;
 			persist();
 			return EXIT_ERROR;
@@ -874,7 +899,7 @@ async function runLoop(
 			rejections: task.rejections,
 			attempts: task.attempts,
 			maxAttempts: env.config.verify.max_attempts,
-			maxFiles: env.config.atomic.max_files,
+			maxFiles: fileBudgetOf(task, env.config.atomic.max_files),
 			maxChildren: env.config.plan.max_children,
 			researchBudget: researchBudgetOf(task, env.config.plan.research_budget),
 			lookBudget: env.config.plan.look_budget,
@@ -1074,7 +1099,7 @@ async function runLoop(
 		// oversized is the signal — that is when retrying the same oversized
 		// prompt has stopped being worth the tokens.
 		if (attempts >= env.config.verify.max_attempts) {
-			if (env.config.atomic.on_overflow === "promote" && live.overflowed && assignmentFor(live) === "act") {
+			if (env.config.atomic.on_overflow === "promote" && live.overflowed && isPromotable(live)) {
 				promoteToPlan(env.store, live, `Promoted to plan: ${live.overflow_reason ?? "over budget"}`);
 				live.research_budget = researchBudgetOf(live, env.config.plan.research_budget);
 				persist();
@@ -1104,6 +1129,16 @@ export async function main(argv: string[]): Promise<number> {
 	}
 
 	const flags = parseArgs(rest);
+	// `todo run --help` used to start a real fifty-iteration run: help was only
+	// ever checked as a command, and as a flag it parsed to a boolean nobody
+	// read. Discovered by accident, and it cost a queue reset.
+	// `-h` is not a `--` flag, so it parses as a positional: check the raw
+	// argument rather than the parsed one, or `todo run -h` is a fifty-iteration
+	// run with "-h" for a task id.
+	if (bool(flags, "help") || rest[0] === "-h" || rest[0] === "help") {
+		console.log(USAGE);
+		return EXIT_OK;
+	}
 	const env = loadEnv(flags);
 
 	switch (command) {
