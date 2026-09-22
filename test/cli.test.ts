@@ -5,10 +5,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { after, before, test } from "node:test";
 import { promisify } from "node:util";
-import { treeDisposition, workerArgs } from "../src/cli.ts";
+import { noteOverflow, treeDisposition, workerArgs } from "../src/cli.ts";
 import { evidenceFilePath } from "../src/evidence.ts";
 import { DEFAULT_CONFIG, parseConfig } from "../src/config.ts";
-import { loadStore } from "../src/store.ts";
+import { loadStore, type Task } from "../src/store.ts";
 
 const run = promisify(execFile);
 const cli = path.join(import.meta.dirname, "..", "src", "cli.ts");
@@ -673,4 +673,42 @@ test("a refusal to start on a dirty tree says which files and what to do", async
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
+});
+
+test("the prompt a wide act is handed names its own budget", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "todo-loop-budget-"));
+	try {
+		fs.writeFileSync(path.join(dir, "todoloop.toml"), "[atomic]\nmax_files = 5\n");
+		fs.writeFileSync(
+			path.join(dir, "todo.toml"),
+			'[loop]\nrunning = false\n\n[[task]]\nid = "wide"\ntitle = "Scaffold the project"\nmax_files = 13\n',
+		);
+		const { stdout } = await run("node", ["--experimental-strip-types", cli, "next", "--cwd", dir], { cwd: dir });
+		// Rendering the project's 5 here would tell a worker its correct diff is
+		// too big, on a task whose whole point is that it is legitimately wide.
+		assert.match(stdout, /roughly 13 files at most/);
+		assert.doesNotMatch(stdout, /roughly 5 files at most/);
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("overflow is judged against whichever budget the task actually has", () => {
+	const config = parseConfig("[atomic]\nmax_files = 5\n");
+	const env = { config } as never as Parameters<typeof noteOverflow>[0];
+	const files = ["a", "b", "c", "d", "e", "f"];
+
+	const plain = { id: "a", title: "a", status: "todo", attempts: 0 } as Task;
+	noteOverflow(env, plain, files);
+	assert.equal(plain.overflowed, true, "six files against a budget of five");
+	assert.match(plain.overflow_reason ?? "", /budget 5/);
+
+	const wide = { id: "b", title: "b", status: "todo", attempts: 0, max_files: 13 } as Task;
+	noteOverflow(env, wide, files);
+	assert.equal(wide.overflowed, undefined, "the same diff is within its own budget");
+
+	const overrun = { id: "c", title: "c", status: "todo", attempts: 0, max_files: 2 } as Task;
+	noteOverflow(env, overrun, files);
+	assert.equal(overrun.overflowed, true);
+	assert.match(overrun.overflow_reason ?? "", /its own budget 2/, "and says whose budget was blown");
 });

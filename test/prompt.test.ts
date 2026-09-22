@@ -612,8 +612,9 @@ test("a planning round gets the clarification, not the whole argument", () => {
 
 test("a planner is told the file budget can move, and that moving it is rare", () => {
 	const prompt = renderPlanPrompt(store, store.tasks[0], { mode: "tool" });
-	assert.match(prompt, /max_files/);
-	assert.match(prompt, /a project scaffold, a rename across every call site/);
+	assert.match(prompt, /Some work is wide and still one thing/, "the case for moving it");
+	assert.match(prompt, /give the act its own `max_files`/, "and the name of the thing to move");
+	assert.match(prompt, /say in the detail why the work cannot be narrower/);
 	assert.match(prompt, /a second time in one round/, "the guard against it becoming habit");
 });
 

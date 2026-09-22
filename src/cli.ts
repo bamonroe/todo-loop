@@ -223,7 +223,7 @@ async function timedOutRound(env: Env, task: Task, budgetMs: number): Promise<Pl
  * files was not atomic, and that is worth knowing before the queue fills up
  * with more like it.
  */
-function noteOverflow(env: Env, task: Task, files: string[]): void {
+export function noteOverflow(env: Env, task: Task, files: string[]): void {
 	if (env.config.atomic.on_overflow === "off") return;
 	const budget = fileBudgetOf(task, env.config.atomic.max_files);
 	if (files.length <= budget) return;
