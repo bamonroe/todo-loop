@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { test } from "node:test";
 import { parseConfig } from "../src/config.ts";
-import { auditQueue, budgetChecks, envChecks, formatChecks, modelChecks, type Check } from "../src/doctor.ts";
+import { auditQueue, budgetChecks, envChecks, formatChecks, gitChecks, modelChecks, type Check } from "../src/doctor.ts";
 import { parseStore } from "../src/store.ts";
 
 function levelOf(checks: Check[], label: string): string | undefined {
@@ -299,4 +303,53 @@ test("doctor makes a raised file budget visible", () => {
 	const checks = budgetChecks(store, config);
 	assert.equal(levelOf(checks, "file budgets"), "ok");
 	assert.match(detailOf(checks, "file budgets") ?? "", /a=13/);
+});
+
+test("the overflow advice does not recommend a setting the project already has on", () => {
+	const store = parseStore(
+		['[[task]]', 'id = "a"', 'title = "Scaffold"', "overflowed = true", 'overflow_reason = "touched 12 files"'].join(
+			"\n",
+		),
+	);
+
+	const off = detailOf(auditQueue(store, "warn"), "tasks that ran over budget") ?? "";
+	assert.match(off, /Split them/);
+	assert.match(off, /on_overflow = "promote"/);
+
+	const on = detailOf(auditQueue(store, "promote"), "tasks that ran over budget") ?? "";
+	assert.doesNotMatch(on, /Split them/, "telling someone to do by hand what the loop is already set to do");
+	assert.match(on, /already/);
+	assert.match(on, /next pass/);
+});
+
+test("doctor names the files that make the tree dirty", async () => {
+	const repo = fs.mkdtempSync(path.join(os.tmpdir(), "todo-loop-doctor-"));
+	try {
+		const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
+		git("init", "-q");
+		git("config", "user.email", "test@example.com");
+		git("config", "user.name", "Test");
+		fs.writeFileSync(path.join(repo, "todo.toml"), "[loop]\nrunning = false\n");
+		git("add", "-A");
+		git("commit", "-qm", "initial");
+
+		const config = parseConfig("");
+		assert.equal(levelOf(await gitChecks(repo, config, ["todo.toml"]), "git"), "ok");
+
+		// A stray binary a worker left behind is exactly the case: the message
+		// has to name it, because nothing else in the run will.
+		fs.writeFileSync(path.join(repo, ".tmp_screenshot.png"), "not really a png");
+		fs.writeFileSync(path.join(repo, "todo.toml"), "[loop]\nrunning = true\n");
+		const checks = await gitChecks(repo, config, ["todo.toml"]);
+		assert.equal(levelOf(checks, "git"), "fail");
+		const detail = detailOf(checks, "git") ?? "";
+		assert.match(detail, /\.tmp_screenshot\.png/);
+		assert.doesNotMatch(detail, /todo\.toml/, "the queue file is the loop's own and never counts");
+		assert.match(detail, /checkout/, "and it says how to get out of it");
+
+		// checkpoint = commit sweeps it in deliberately, so it is not a failure.
+		assert.equal(levelOf(await gitChecks(repo, parseConfig('[loop]\ncheckpoint = "commit"\n'), []), "git"), "ok");
+	} finally {
+		fs.rmSync(repo, { recursive: true, force: true });
+	}
 });

@@ -18,7 +18,7 @@ import * as fs from "node:fs";
 import { promisify } from "node:util";
 import type { Config } from "./config.ts";
 import { inheritsWorker, isLocalRef, piDefaultRef, reservedEnv, splitModelRef } from "./config.ts";
-import { isGitRepo, isTreeClean, loopOwnedPaths } from "./evidence.ts";
+import { dirtyPaths, isGitRepo, isTreeClean, loopOwnedPaths } from "./evidence.ts";
 import { endpointFor, piAuthProviders, REMOTE_PROVIDERS, type Endpoint } from "./providers.ts";
 import {
 	activeTasks,
@@ -124,7 +124,11 @@ export async function probeLatency(endpoint: Endpoint): Promise<{ ms: number; er
  * tree questions each check asks (is this a leaf, who is its parent) are wrong
  * without them.
  */
-export function auditQueue(store: Store): Check[] {
+/**
+ * `onOverflow` is the project's `atomic.on_overflow`; the overflow advice reads
+ * differently depending on whether the loop is already set to act on it.
+ */
+export function auditQueue(store: Store, onOverflow?: Config["atomic"]["on_overflow"]): Check[] {
 	const checks: Check[] = [];
 	const active = activeTasks(store);
 	const seen = new Set<string>();
@@ -206,7 +210,13 @@ export function auditQueue(store: Store): Check[] {
 			label: "tasks that ran over budget",
 			detail:
 				`${coarse.map((task) => `${task.id} (${task.overflow_reason})`).join(", ")} — these were not atomic. ` +
-				"Split them, or set atomic.on_overflow = \"promote\" to have the loop break them down itself.",
+				// Telling someone to turn on a setting they already have on reads
+				// as the check not having looked, and it is the one line here
+				// that could have looked.
+				(onOverflow === "promote"
+					? "on_overflow is already \"promote\", so the loop breaks these down itself on the next pass; " +
+						"the mark stays as the record of why."
+					: "Split them, or set atomic.on_overflow = \"promote\" to have the loop break them down itself."),
 		});
 	}
 
@@ -533,6 +543,41 @@ export function budgetChecks(store: Store, config: Config): Check[] {
 	];
 }
 
+/**
+ * What git says about starting a run here.
+ *
+ * `owned` is the set of paths the loop rewrites itself, excluded for the same
+ * reason the run loop excludes them: a queue file the loop is about to rewrite
+ * anyway is not work that would get swept into the wrong commit.
+ */
+export async function gitChecks(cwd: string, config: Config, owned: string[]): Promise<Check[]> {
+	if (!(await isGitRepo(cwd))) {
+		return [
+			{
+				level: config.loop.checkpoint === "off" ? "ok" : "warn",
+				label: "git",
+				detail: "not a git repository — the diff shown to the verifier will be empty, so verification cannot work",
+			},
+		];
+	}
+	const clean = await isTreeClean(cwd, owned);
+	if (clean) return [{ level: "ok", label: "git", detail: "repository is clean" }];
+	// Naming the files is the whole value of running doctor before a run:
+	// "dirty" sends you to `git status`, a filename you can act on. The ways
+	// out are the same three the run loop's own refusal offers.
+	const dirty = await dirtyPaths(cwd, owned);
+	const listed = dirty.slice(0, 10).join(", ") + (dirty.length > 10 ? `, and ${dirty.length - 10} more` : "");
+	return [
+		{
+			level: config.loop.checkpoint === "require-clean" ? "fail" : "ok",
+			label: "git",
+			detail:
+				`working tree is dirty (checkpoint = ${config.loop.checkpoint}): ${listed} — commit it, ` +
+				'`git checkout -- .` if it is not worth keeping, or set loop.checkpoint = "commit"',
+		},
+	];
+}
+
 export async function diagnose(options: DoctorOptions): Promise<Check[]> {
 	const { cwd, config, store } = options;
 	const checks: Check[] = [];
@@ -546,23 +591,9 @@ export async function diagnose(options: DoctorOptions): Promise<Check[]> {
 		}),
 	);
 
-	if (await isGitRepo(cwd)) {
-		// Same exclusions the run loop uses: a queue file the loop is about to
-		// rewrite anyway is not work that would get swept into the wrong commit.
-		const owned = loopOwnedPaths(cwd, [options.storeFile, store.archive?.file, store.sidecarFile]);
-		const clean = await isTreeClean(cwd, owned);
-		checks.push({
-			level: clean || config.loop.checkpoint !== "require-clean" ? "ok" : "fail",
-			label: "git",
-			detail: clean ? "repository is clean" : `working tree is dirty (checkpoint = ${config.loop.checkpoint})`,
-		});
-	} else {
-		checks.push({
-			level: config.loop.checkpoint === "off" ? "ok" : "warn",
-			label: "git",
-			detail: "not a git repository — the diff shown to the verifier will be empty, so verification cannot work",
-		});
-	}
+	checks.push(
+		...(await gitChecks(cwd, config, loopOwnedPaths(cwd, [options.storeFile, store.archive?.file, store.sidecarFile]))),
+	);
 
 	checks.push(
 		config.verify.test_command || config.verify.build_command
@@ -581,7 +612,7 @@ export async function diagnose(options: DoctorOptions): Promise<Check[]> {
 	checks.push(...budgetChecks(store, config));
 	checks.push(...envChecks(config));
 
-	checks.push(...auditQueue(store));
+	checks.push(...auditQueue(store, config.atomic.on_overflow));
 
 	if (options.probe) {
 		const result = await probeLatency(verifierEndpoint);
