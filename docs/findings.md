@@ -311,10 +311,35 @@ local worker routinely cannot finish an act inside half an hour.
 - **`atomic.max_files = 5` is wrong for a scaffold**, which inherently touches
   about twelve files. Later promotion mitigates it; the budget itself was never
   revisited.
+  **Fixed in `96eea7d`:** an act may carry its own `max_files`, set by the
+  planner that writes it. Measured: run 14's scaffold was thirteen files and 444
+  lines, built green, and was stamped too coarse anyway. It is a claim rather
+  than an exemption — the number is in the queue, the act hears its own budget,
+  the overflow note says whose budget was blown, and `todo doctor` lists every
+  task carrying one so a planner that starts reaching for it is visible.
 - **A docs or research act should probably never be promotable.** Breaking a
   one-file note into children is never the answer. `cf477d7` stops the run-11
   cascade at its source, so this is belt-and-braces.
+  **Fixed in `96eea7d`:** `isPromotable` gates promotion on a code act, shared
+  by the driver and the extension.
 - **`todo run --help` is not a flag** — it starts a real 50-iteration run.
   Discovered by accident; cost a queue reset.
+  **Fixed in `96eea7d`:** help is checked before the command runs, as a flag and
+  as a bare `-h`, which is not a `--` flag and so parsed as a task id. The test
+  carries its own timeout: the regression's shape is a run that never stops, and
+  unbounded it would hang the suite rather than fail it.
+- **Thinking is where the run's time goes, and we told it the opposite.**
+  Measured over run 14's last eight sessions with `scripts/turn-cost.ts`: every
+  tool call — builds, lint, API lookups, file reads, an emulator screenshot —
+  cost 1.3 minutes in total, against 123.6 minutes of generation, 98% of it
+  reasoning. The three worst turns took eleven to twelve minutes each and
+  reached no tool call until the end; one opened by planning its calls with the
+  note "keep count low!". Every mention of tools in the prompt was framed as a
+  cost, so the worker economised on the resource that costs nothing.
+  **Fixed in `0e049f0`:** an economics block in the act prompt — calls are not
+  counted, a result's *size* is what costs, look it up instead of recalling it,
+  do not draft code in reasoning, let the build settle what you cannot. Re-run
+  `scripts/turn-cost.ts` against run 15 to see whether the tail shortens.
+
 - **`thinking_keep_bytes` has never fired live.** It only acts past
   `prune_at_fraction` of the window, which no session has yet reached.
