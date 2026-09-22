@@ -35,7 +35,7 @@ import {
 	revertTo,
 	runCommand,
 } from "./evidence.ts";
-import { renderAssignmentPrompt } from "./prompt.ts";
+import { renderAssignmentPrompt, type PromptOptions } from "./prompt.ts";
 import { maintainNotes } from "./notes.ts";
 import { checkPlanRound, type PlanVerdict } from "./plan.ts";
 import {
@@ -364,6 +364,37 @@ function commandStop(env: Env): number {
 	return EXIT_OK;
 }
 
+/**
+ * Everything the prompt needs about this task and this project.
+ *
+ * One function because there were two copies of it — `todo next` and the loop
+ * — and they had to stay byte-identical for `todo next` to be worth anything:
+ * its whole job is showing what the loop would send. They already drifted once
+ * in a way no test could see, because only the printed copy was ever rendered
+ * by a test.
+ */
+function assignmentOptions(env: Env, task: Task): PromptOptions {
+	return {
+		mode: "standalone",
+		lastFailure: env.store.loop.last_failure,
+		rejections: task.rejections,
+		attempts: task.attempts,
+		maxAttempts: env.config.verify.max_attempts,
+		maxFiles: fileBudgetOf(task, env.config.atomic.max_files),
+		maxChildren: env.config.plan.max_children,
+		researchBudget: researchBudgetOf(task, env.config.plan.research_budget),
+		lookBudget: env.config.plan.look_budget,
+		maxDepth: env.config.plan.max_depth,
+		memoryFile: env.config.plan.memory_file,
+		buildCommand: env.config.verify.build_command,
+		workerCheck: env.config.verify.worker_check,
+		workerTools: env.config.project.worker_tools,
+		interruptedThinking: task.interrupted_thinking,
+		carriedWork: env.store.loop.carried === task.id,
+		testCommand: env.config.verify.test_command,
+	};
+}
+
 function commandNext(env: Env, flags: Flags): number {
 	const task = nextReady(env.store);
 	if (!task) return EXIT_EMPTY;
@@ -372,25 +403,7 @@ function commandNext(env: Env, flags: Flags): number {
 		return EXIT_OK;
 	}
 	console.log(
-		renderAssignmentPrompt(env.store, task, {
-			mode: "standalone",
-			lastFailure: env.store.loop.last_failure,
-			rejections: task.rejections,
-			attempts: task.attempts,
-			maxAttempts: env.config.verify.max_attempts,
-			maxFiles: fileBudgetOf(task, env.config.atomic.max_files),
-			maxChildren: env.config.plan.max_children,
-			researchBudget: researchBudgetOf(task, env.config.plan.research_budget),
-			lookBudget: env.config.plan.look_budget,
-			maxDepth: env.config.plan.max_depth,
-			memoryFile: env.config.plan.memory_file,
-			buildCommand: env.config.verify.build_command,
-			workerCheck: env.config.verify.worker_check,
-			workerTools: env.config.project.worker_tools,
-			interruptedThinking: task.interrupted_thinking,
-			carriedWork: env.store.loop.carried === task.id,
-			testCommand: env.config.verify.test_command,
-		}),
+		renderAssignmentPrompt(env.store, task, assignmentOptions(env, task)),
 	);
 	return EXIT_OK;
 }
@@ -893,25 +906,7 @@ async function runLoop(
 		env.store.loop.iterations = iteration;
 		persist();
 
-		const prompt = renderAssignmentPrompt(env.store, task, {
-			mode: "standalone",
-			lastFailure: env.store.loop.last_failure,
-			rejections: task.rejections,
-			attempts: task.attempts,
-			maxAttempts: env.config.verify.max_attempts,
-			maxFiles: fileBudgetOf(task, env.config.atomic.max_files),
-			maxChildren: env.config.plan.max_children,
-			researchBudget: researchBudgetOf(task, env.config.plan.research_budget),
-			lookBudget: env.config.plan.look_budget,
-			maxDepth: env.config.plan.max_depth,
-			memoryFile: env.config.plan.memory_file,
-			buildCommand: env.config.verify.build_command,
-			workerCheck: env.config.verify.worker_check,
-			workerTools: env.config.project.worker_tools,
-			interruptedThinking: task.interrupted_thinking,
-			carriedWork: env.store.loop.carried === task.id,
-			testCommand: env.config.verify.test_command,
-		});
+		const prompt = renderAssignmentPrompt(env.store, task, assignmentOptions(env, task));
 
 		const planning = assignmentFor(task) === "plan";
 		const kind = planning ? "plan next steps for" : `${kindOf(task)}`;
