@@ -629,10 +629,15 @@ test("asking for help never starts a run", async () => {
 	// `todo run --help` used to start a real fifty-iteration loop: help was
 	// checked as a command and ignored as a flag. It cost a queue reset.
 	for (const flag of ["--help", "-h"]) {
-		const result = await todo("run", flag);
-		assert.equal(result.code, 0, `${flag} exits clean`);
-		assert.match(result.stdout, /todo — autonomous todo loop/);
-		assert.doesNotMatch(result.stdout + result.stderr, /iteration|plan next steps/i, `${flag} started a run`);
+		// Its own timeout, not the suite's: the failure this guards against is a
+		// loop that starts and keeps going, and without a bound the regression
+		// shows up as a test run that never finishes rather than one that fails.
+		const { stdout, stderr } = await run("node", ["--experimental-strip-types", cli, "run", flag, "--cwd", workspace], {
+			cwd: workspace,
+			timeout: 20_000,
+		});
+		assert.match(stdout, /todo — autonomous todo loop/, `${flag} prints usage`);
+		assert.doesNotMatch(stdout + stderr, /iteration|plan next steps/i, `${flag} started a run`);
 	}
 });
 
