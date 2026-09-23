@@ -1,20 +1,60 @@
 # todo-loop
 
-An autonomous to-do loop for [pi](https://pi.dev), built for a local model with
-limited VRAM and a narrow context window.
+A looping harness that puts a **small, locally-hosted model** to work on a
+problem far larger than one of its sessions — scaffolding and tooling built
+around the [pi](https://pi.dev) coding agent
+([earendil-works/pi](https://github.com/earendil-works/pi)).
 
-One task per session. The queue lives on disk. A task only closes when a
-*different* model, shown the diff and the test output but never the worker's own
-account of what it did, agrees that the diff does what the task text asked.
+## What this is
 
-The reasoning behind each of those choices is in [docs/design-notes.md](docs/design-notes.md).
+A 27B model quantised onto a single consumer GPU can write a correct function.
+It cannot hold a project. Hand it *"rebuild the authentication system"* and it
+will spend its window deliberating, run out of context somewhere in the middle,
+and finish by reporting a success it has no way to back up.
+
+todo-loop is the scaffolding that stands between those two facts. Instead of one
+heroic session, a broad goal is worked down — iteratively, by the model itself —
+into units small enough that a narrow context window is enough, and each unit is
+checked by something other than the model that produced it:
+
+- **The queue lives on disk**, not in the conversation, so it survives the thing
+  the loop does most often: throwing the context away.
+- **One task per session.** Context is cleared by process exit or by session
+  replacement, never by hoping the model forgets.
+- **The plan grows as the work does.** A `plan` task is asked only *"what are
+  the next few steps?"*, writes them into the queue, and comes back for another
+  round once they ship. Nothing has to be broken down up front — drop a single
+  broad item in the queue and the loop generates the rest against a repository
+  that actually exists by the time it is asked.
+- **A task closes on evidence, not on assertion.** The build and tests run
+  first, and only then does a *different* model see the diff and the command
+  output — never the worker's own account of what it did — and answer one narrow
+  question: does this diff do what the task asked? Silence, an unparseable
+  answer, or an empty diff all fail closed.
+- **The harness manages the context the model cannot.** Bulky tool results are
+  elided at a threshold, output is capped at both ends, compaction summaries are
+  replaced with fields, and the task itself is pinned into the system prompt
+  where no amount of pruning can lose it.
+
+The constraint the whole design answers is scarcity — of VRAM, of context, and
+of the model's willingness to stay on task. Everything here is either a way to
+spend less of one, or a way to find out that a session wasted it. Nothing needs
+a frontier model; the verifier can be a 9B, or the same model judging itself,
+and the harness says plainly what each choice costs you.
+
+It is not a general agent framework. It runs a queue, overnight, unattended, and
+tells you in the morning which items it could prove it finished.
+
+The reasoning behind each choice is in
+[docs/design-notes.md](docs/design-notes.md); what changed after running it
+against a real project is in [docs/findings.md](docs/findings.md).
 
 ## Install
 
 Nothing to build. Node 22.18+ runs the TypeScript directly.
 
 ```bash
-git clone <this repo> todo-loop
+git clone https://github.com/bamonroe/todo-loop.git
 cd your-project
 node /path/to/todo-loop/src/cli.ts init      # or: /path/to/todo-loop/bin/todo init
 todo doctor                                  # check models, VRAM, git and queue shape
@@ -626,7 +666,7 @@ rejected.
 ## Tests
 
 ```bash
-node --test test/      # 150 tests, no model required
+node --test test/      # 344 tests, no model required
 npx tsc                # type-checks src, extension and tests
 ```
 

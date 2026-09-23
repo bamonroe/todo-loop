@@ -2,6 +2,12 @@
 	"name": "todo-loop",
 	"version": "0.1.0",
 	"private": true,
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/bamonroe/todo-loop.git"
+	},
+	"homepage": "https://github.com/bamonroe/todo-loop#readme",
 	"description": "Autonomous todo loop for the pi coding agent: one task per session, verified before it closes.",
 	"keywords": [
 		"pi-package"
