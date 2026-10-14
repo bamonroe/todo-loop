@@ -687,9 +687,8 @@ export function workerArgs(config: Config, prompt: string): { args: string[]; mo
 	// before "--" because everything after it is the prompt.
 	const packages = config.project.packages.flatMap((entry) => ["-e", entry]);
 	const isolation = packages.length ? ["--no-extensions", ...packages] : [];
-	// pi reads a trailing `:suffix` on --model as a thinking level, so an ollama
-	// tag like `qwen3.8-27b:52k` cannot round-trip through the flag. Inheriting
-	// pi's own default is the way out when that bites.
+	// An ollama tag like `qwen3.8-27b:52k` round-trips through --model: pi reads
+	// a trailing `:suffix` as a thinking level only when it names one.
 	const base = ["-p", "--approve", "--mode", "json"];
 	if (inheritsWorker(config)) return { args: [...base, ...isolation, "--", prompt], model: "inherited from pi" };
 	const { provider, model } = splitModelRef(config.models.worker);

@@ -208,6 +208,27 @@ test("a hosted worker still needs pi to hold the credentials", () => {
 	assert.match(detailOf(checks, "worker model") ?? "", /\/login/);
 });
 
+test("an ollama tag with a size suffix is a plain model id to pi", () => {
+	const checks = modelChecks(withModels("ollama/qwen3.8-27b:52k", "opencode/qwen3.6-plus"), {
+		local: LOCAL,
+		piProviders: ["opencode"],
+	});
+	// Not pulled, so that much is a failure — but the old check also blamed the
+	// suffix and said to fall back to "inherit", when pi resolves the whole tag
+	// before it looks for a thinking level in it.
+	assert.equal(levelOf(checks, "worker model"), "fail");
+	assert.equal(levelOf(checks, "worker model reference"), undefined);
+});
+
+test("an ollama tag whose suffix names a thinking level is flagged", () => {
+	const checks = modelChecks(withModels("ollama/qwen3:high", "opencode/qwen3.6-plus"), {
+		local: [...LOCAL, { name: "qwen3:high", size: 5e9 }],
+		piProviders: ["opencode"],
+	});
+	assert.equal(levelOf(checks, "worker model reference"), "warn");
+	assert.match(detailOf(checks, "worker model reference") ?? "", /models\.json/);
+});
+
 test("ollama being down is only a failure when something runs on it", () => {
 	const hosted = modelChecks(withModels("openai-codex/gpt-5.6-terra", "opencode/qwen3.6-plus"), {
 		local: undefined,

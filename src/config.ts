@@ -10,16 +10,17 @@ import { isRaw, parseToml } from "./toml.ts";
 export interface Config {
 	models: {
 		/**
-		 * Worker model, as "provider/model". Both loop shapes honour it: the shell
-		 * driver passes it to `pi -p`, and in-session the extension sets it on each
-		 * fresh session. "inherit" leaves whatever pi is already configured to use.
+		 * Worker model, as "provider/model". Only the shell driver honours it: it
+		 * passes it to `pi -p`. In-session the extension runs on the session's
+		 * model and only warns when the two disagree. "inherit" leaves whatever pi
+		 * is already configured to use.
 		 *
 		 * `todo --provider` and `todo --model` override it for a single run, so the
 		 * default here is a starting point rather than a commitment.
 		 *
-		 * Note that pi's `--model` flag reads a trailing `:suffix` as a thinking
-		 * level, so an ollama tag like `qwen3.8-27b:52k` cannot be passed through
-		 * it. "inherit" sidesteps that entirely.
+		 * An ollama tag like `qwen3.8-27b:52k` passes through `--model` intact: pi
+		 * tries the whole tag as a model id first, and reads a trailing `:suffix`
+		 * as a thinking level only when it is a level name.
 		 */
 		worker: string;
 		/**

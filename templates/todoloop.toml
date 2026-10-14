@@ -9,15 +9,20 @@
 # `todo --provider <name>` and `todo --model <id>` override this for one run, so
 # trying another model does not mean editing the file.
 #
-# "inherit" uses pi's own configured default instead. Use it for a local worker:
-# pi's --model flag reads a trailing ":suffix" as a thinking level, so an ollama
-# tag like "qwen3.8-27b:52k" cannot be passed through the flag at all.
+# "inherit" uses pi's own configured default instead.
+#
+# An ollama tag goes through as written — "ollama/qwen3.8-27b:52k" works. pi
+# tries the whole tag as a model id first, and reads a trailing ":suffix" as a
+# thinking level only when the suffix is a level name (off, low, high, ...).
+# Register a local tag in ~/.pi/agent/models.json with the context ollama
+# actually loads it at: pi prunes against that number, and a window it
+# overstates means ollama silently drops the front of the prompt instead.
 worker = "openai-codex/gpt-5.6-terra"
 # The verifier. Keep it different from the worker: a model judging its own
 # output is the weakest version of this check. The verify call is short, so a
 # small model is fine here.
 #
-# Two shapes work:
+# Three shapes work:
 #
 #   opencode/<model>     hosted on OpenCode Zen
 #   opencode-go/<model>  hosted on OpenCode Go

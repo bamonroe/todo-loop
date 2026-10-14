@@ -537,13 +537,15 @@ matter most:
   credentials for the provider. `todo --provider <name>` and `todo --model <id>`
   override it for a single run — either alone is enough, and a `--model` that
   carries its own `provider/` prefix decides both halves. Set it to `inherit` to
-  use whatever pi is already configured with, which is the right answer for a
-  local worker: pi's `--model` flag reads a trailing `:suffix` as a thinking
-  level, so an Ollama tag like `qwen3.8-27b:52k` cannot be passed through the
-  flag at all. The in-session extension still uses the active session model —
-  it cannot set the model on a session it is in the middle of replacing — but
-  `/todo-run` now says so when the two disagree, rather than running the queue
-  on a model the config claims it is not using.
+  use whatever pi is already configured with. An Ollama tag passes through as
+  written — `ollama/qwen3.8-27b:52k` works, because pi tries the whole tag as a
+  model id before reading a trailing `:suffix` as a thinking level, and does
+  that only for level names like `:low` or `:high`. Register a local tag in
+  `~/.pi/agent/models.json` with the context Ollama really loads it at; pi
+  prunes against that number. The in-session extension still uses the active
+  session model — it cannot set the model on a session it is in the middle of
+  replacing — but `/todo-run` now says so when the two disagree, rather than
+  running the queue on a model the config claims it is not using.
 - `models.verifier` — keep it different from the worker. A model judging its own
   output is the weakest version of this check, and the verify call is short
   enough that a small model is fine. Defaults to `opencode/qwen3.6-plus`; see
@@ -666,7 +668,7 @@ rejected.
 ## Tests
 
 ```bash
-node --test test/      # 344 tests, no model required
+node --test test/      # 346 tests, no model required
 npx tsc                # type-checks src, extension and tests
 ```
 

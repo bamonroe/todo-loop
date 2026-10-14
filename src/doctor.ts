@@ -332,6 +332,9 @@ export interface ModelEnvironment {
  * a local verifier, both hosted, ollama down but nothing local configured — are
  * testable without an ollama or a GPU.
  */
+/** The suffixes pi's --model parsing treats as a thinking level, as of pi 1.0. */
+const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
 export function modelChecks(config: Config, env: ModelEnvironment): Check[] {
 	const checks: Check[] = [];
 	const findLocal = (name: string) =>
@@ -379,11 +382,15 @@ export function modelChecks(config: Config, env: ModelEnvironment): Check[] {
 			);
 		}
 
-		if (!inherited && /:[^:]+$/.test(worker.model) && !findLocal(worker.model)) {
+		// pi tries the whole tag as a model id first, and only then reads a
+		// trailing `:suffix` as a thinking level — and only one that names a level.
+		// So "qwen3.8-27b:52k" goes through intact; "qwen3:high" may not.
+		const suffix = /:([^:/]+)$/.exec(worker.model)?.[1];
+		if (!inherited && suffix && PI_THINKING_LEVELS.has(suffix)) {
 			checks.push({
 				level: "warn",
 				label: "worker model reference",
-				detail: `pi reads the ":" suffix in ${config.models.worker} as a thinking level, so --model will not resolve it; use "inherit" instead`,
+				detail: `pi may read ":${suffix}" in ${config.models.worker} as a thinking level; register the full tag in ~/.pi/agent/models.json so --model matches it exactly`,
 			});
 		}
 	} else {
