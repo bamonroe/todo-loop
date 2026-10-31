@@ -93,9 +93,9 @@ test("the env table is read as written", () => {
 	assert.deepEqual(parseConfig("").env, {}, "no table is no variables, not a default set");
 
 	const env = parseConfig(
-		['[env]', 'PI_ANDROID_PROJECT = "/data/eq2"', "PORT = 8080", "STRICT = true", 'EMPTY = ""'].join("\n"),
+		['[env]', 'PI_ANDROID_PROJECT = "/services/eq2"', "PORT = 8080", "STRICT = true", 'EMPTY = ""'].join("\n"),
 	).env;
-	assert.equal(env.PI_ANDROID_PROJECT, "/data/eq2");
+	assert.equal(env.PI_ANDROID_PROJECT, "/services/eq2");
 	assert.equal(env.PORT, "8080", "a number arrives as its digits");
 	assert.equal(env.STRICT, "true", "a boolean is rendered, not interpreted — guessing at \"1\" would change what the file says");
 	assert.equal(env.EMPTY, "", "empty is a real value: it is how you unset something the ambient shell exported");

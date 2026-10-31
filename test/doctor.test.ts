@@ -294,7 +294,7 @@ test("what leaves the machine is disclosed once, naming every remote role", () =
 test("doctor says what the project env will and will not do", () => {
 	assert.deepEqual(envChecks(parseConfig("")), [], "no table, nothing to report — doctor is not a config dump");
 
-	const plain = envChecks(parseConfig('[env]\nPI_ANDROID_PROJECT = "/data/eq2"\n'), () => true);
+	const plain = envChecks(parseConfig('[env]\nPI_ANDROID_PROJECT = "/services/eq2"\n'), () => true);
 	assert.deepEqual(plain.map((check) => check.level), ["ok"]);
 	assert.match(plain[0].detail, /PI_ANDROID_PROJECT/);
 

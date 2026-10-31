@@ -471,7 +471,7 @@ Qwen's thinking mode loop.
 
 \subsection{The container boundary}
 
-Android builds do not run on the host. \file{/data/android/build.sh} executes
+Android builds do not run on the host. \file{/services/android/build.sh} executes
 Gradle inside a per-project container, and the emulator is a separate container
 again. Neither touches the GPU. The relevance to this document is timing rather
 than memory: \texttt{docker run} on a warm image costs 11--28\,s on this box

@@ -367,8 +367,8 @@ test("worker_check replaces the raw commands rather than joining them", () => {
 	// costs more context than the retry it saves.
 	const prompt = renderActPrompt(store, task, {
 		mode: "tool",
-		buildCommand: "BAM_STORE_PUBLISH=0 /data/android/build.sh /data/equalizer :app:assembleDebug",
-		testCommand: "BAM_STORE_PUBLISH=0 /data/android/build.sh /data/equalizer :app:testDebugUnitTest",
+		buildCommand: "BAM_STORE_PUBLISH=0 /services/android/build.sh /services/equalizer :app:assembleDebug",
+		testCommand: "BAM_STORE_PUBLISH=0 /services/android/build.sh /services/equalizer :app:testDebugUnitTest",
 		workerCheck: "Use android_build and android_test.",
 	});
 

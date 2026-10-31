@@ -2,7 +2,7 @@
 
 What running the loop against a real project has taught us about the harness
 around it. The project under test is an Android graphic equalizer at
-`/data/equalizer`, built by `qwen3.8-27b` locally with `qwen3.5-plus` verifying.
+`/services/equalizer`, built by `qwen3.8-27b` locally with `qwen3.5-plus` verifying.
 
 Every finding here came from running the thing. None came from reading the code
 — in each case the code looked correct.
@@ -150,7 +150,7 @@ Twenty minutes, one commit, halted by a documentation task.
 Round one planned a docs act first — write the acceptance criteria into
 NOTES.md, change nothing else. The act did exactly that. Verification then ran
 `build_command`, as it does for every task, and the Android CLI answered "no
-Android project at or above /data/eq2": the scaffold was the *next* item. Exit
+Android project at or above /services/eq2": the scaffold was the *next* item. Exit
 2, rejected, for a failure the task could not have caused.
 
 The retry drew the only conclusion available to it and scaffolded the whole

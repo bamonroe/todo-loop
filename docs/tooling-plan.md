@@ -9,9 +9,9 @@
 >
 > An earlier version of this note claimed the emulator did not exist,
 > from a probe of the *builder* image (`NO_EMULATOR`). Wrong place: the
-> emulator is `/data/android`'s compose service (`sfit-android-emulator:local`,
+> emulator is `/services/android`'s compose service (`sfit-android-emulator:local`,
 > headless, KVM, SDK and AVDs on the storage array). Booting belongs to
-> `[project].setup_command` (`cd /data/android && docker compose up -d
+> `[project].setup_command` (`cd /services/android && docker compose up -d
 > android`); the verbs find a device present or say plainly that none is.
 > Verified end to end: run 10's own APK installed by the verb, launched,
 > alive — and the first screenshot of the loop's work showed a layout defect
