@@ -17,7 +17,7 @@
 # Register a local tag in ~/.pi/agent/models.json with the context ollama
 # actually loads it at: pi prunes against that number, and a window it
 # overstates means ollama silently drops the front of the prompt instead.
-worker = "openai-codex/gpt-5.6-terra"
+worker = "openai-codex/gpt-6-luna"
 # The verifier. Keep it different from the worker: a model judging its own
 # output is the weakest version of this check. The verify call is short, so a
 # small model is fine here.

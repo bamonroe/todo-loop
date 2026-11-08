@@ -364,7 +364,7 @@ export interface Config {
 
 export const DEFAULT_CONFIG: Config = {
 	models: {
-		worker: "openai-codex/gpt-5.6-terra",
+		worker: "openai-codex/gpt-6-luna",
 		verifier: "opencode/qwen3.6-plus",
 	},
 	verify: {

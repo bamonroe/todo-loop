@@ -539,7 +539,7 @@ See `templates/todoloop.toml` for every option with its default. The ones that
 matter most:
 
 - `models.worker` — the shell driver's model, as `provider/model`. Defaults to
-  `openai-codex/gpt-5.6-terra`, which needs a ChatGPT Plus or Pro subscription
+  `openai-codex/gpt-6-luna`, which needs a ChatGPT Plus or Pro subscription
   logged in through pi's `/login`; `todo doctor` fails loudly if pi holds no
   credentials for the provider. `todo --provider <name>` and `todo --model <id>`
   override it for a single run — either alone is enough, and a `--model` that

@@ -122,14 +122,14 @@ test("a dry run names the model the real run would use", async () => {
 	// Which model the loop is about to spend tokens on is otherwise invisible
 	// until it has spent them.
 	const configured = await todo("run", "--dry-run", "--max", "1");
-	assert.match(configured.stdout, /would run pi \(openai-codex\/gpt-5\.6-terra\) with prompt/);
+	assert.match(configured.stdout, /would run pi \(openai-codex\/gpt-6-luna\) with prompt/);
 
 	const overridden = await todo("run", "--dry-run", "--max", "1", "--model", "ollama/qwen3.8-27b");
 	assert.match(overridden.stdout, /would run pi \(ollama\/qwen3\.8-27b\) with prompt/);
 
 	// --provider alone re-points the configured model at another host.
 	const rehosted = await todo("run", "--dry-run", "--max", "1", "--provider", "opencode");
-	assert.match(rehosted.stdout, /would run pi \(opencode\/gpt-5\.6-terra\) with prompt/);
+	assert.match(rehosted.stdout, /would run pi \(opencode\/gpt-6-luna\) with prompt/);
 });
 
 test("--dry-run previews a planning round as a planning round", async () => {
