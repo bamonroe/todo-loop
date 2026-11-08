@@ -164,13 +164,20 @@ trip.
 
 ## Where the verifier runs
 
-`models.verifier` takes one of three shapes:
+`models.verifier` takes one of four shapes:
 
 ```toml
 verifier = "opencode/qwen3.6-plus"     # hosted on OpenCode Zen (default)
 verifier = "opencode-go/qwen3.8-flash" # hosted on OpenCode Go
 verifier = "ollama/qwen3.5:9b"         # local, nothing leaves the machine
+verifier = "openai-codex/gpt-6-luna"   # any other provider pi can use, asked through pi
 ```
+
+The last shape covers every provider this driver has no endpoint for. Each verdict
+runs `pi -p` once, with no tools and no session, on pi's own login — the way
+to verify with a subscription such as `openai-codex`, which has no API key to
+send. It costs a second or two of pi starting up per task. `todo doctor` checks
+that pi holds credentials for the provider (`src/picall.ts`).
 
 Hosted keys are read from `OPENCODE_API_KEY`, or from whatever `pi` already
 stored in `~/.pi/agent/auth.json`. If `pi auth check --provider opencode` says

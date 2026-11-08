@@ -374,3 +374,18 @@ test("doctor names the files that make the tree dirty", async () => {
 		fs.rmSync(repo, { recursive: true, force: true });
 	}
 });
+
+test("a verifier asked through pi needs pi to hold its login", () => {
+	const ok = modelChecks(withModels("openai-codex/gpt-5.6-terra", "openai-codex/gpt-6-luna"), {
+		local: LOCAL,
+		piProviders: ["openai-codex"],
+	});
+	assert.equal(levelOf(ok, "verifier model"), "ok");
+	assert.match(detailOf(ok, "verifier model") ?? "", /through pi/);
+	const missing = modelChecks(withModels("openai-codex/gpt-5.6-terra", "anthropic/claude-x"), {
+		local: LOCAL,
+		piProviders: ["openai-codex"],
+	});
+	assert.equal(levelOf(missing, "verifier model"), "fail");
+	assert.match(detailOf(missing, "verifier model") ?? "", /no credentials for anthropic/);
+});

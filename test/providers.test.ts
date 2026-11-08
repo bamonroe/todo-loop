@@ -89,9 +89,11 @@ test("an unusable verifier fails the task closed instead of escaping", async () 
 	assert.match(verdict.reason, /no API key/i);
 });
 
-test("an unknown provider names itself in the problem", () => {
-	const endpoint = endpointFor("wishful/some-model", config);
-	assert.match(endpoint.problem ?? "", /unknown provider "wishful"/);
+test("a provider with no endpoint here is asked through pi", () => {
+	const endpoint = endpointFor("openai-codex/gpt-6-luna", config);
+	assert.equal(endpoint.problem, undefined);
+	assert.equal(endpoint.viaPi, true);
+	assert.deepEqual([endpoint.provider, endpoint.model], ["openai-codex", "gpt-6-luna"]);
 });
 
 test("a key set up once with pi is found without an environment variable", () => {

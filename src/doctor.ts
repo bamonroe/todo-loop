@@ -420,7 +420,21 @@ export function modelChecks(config: Config, env: ModelEnvironment): Check[] {
 		});
 	}
 
-	if (verifier.remote) {
+	if (verifier.viaPi) {
+		checks.push(
+			env.piProviders.includes(verifier.provider)
+				? {
+						level: "ok",
+						label: "verifier model",
+						detail: `${verifier.model} via ${verifier.provider}, asked through pi on its own login — hosted, so it never competes with the worker for VRAM`,
+					}
+				: {
+						level: "fail",
+						label: "verifier model",
+						detail: `pi has no credentials for ${verifier.provider} — run /login in pi, or point models.verifier at another model`,
+					},
+		);
+	} else if (verifier.remote) {
 		checks.push(
 			verifier.problem
 				? { level: "fail", label: "verifier model", detail: verifier.problem }

@@ -15,6 +15,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Config } from "./config.ts";
 import { splitModelRef } from "./config.ts";
+import { piCompleter } from "./picall.ts";
 import { chatCompleter, type Completer } from "./verify.ts";
 
 export interface Endpoint {
@@ -30,6 +31,11 @@ export interface Endpoint {
 	remote: boolean;
 	/** Set when the endpoint cannot be used as configured; the reason is user-facing. */
 	problem?: string;
+	/**
+	 * No endpoint of this driver's: the call goes through pi, on pi's own login
+	 * (picall.ts). Whether pi has that login is the doctor's to check.
+	 */
+	viaPi?: boolean;
 }
 
 interface RemoteProvider {
@@ -144,16 +150,9 @@ export function endpointFor(ref: string, config: Config): Endpoint {
 
 	const remote = REMOTE_PROVIDERS[provider];
 	if (!remote) {
-		return {
-			provider,
-			model,
-			baseUrl: "",
-			apiKey: "",
-			remote: true,
-			problem:
-				`unknown provider "${provider}" — this driver speaks ollama, ${Object.keys(REMOTE_PROVIDERS).join(" and ")}. ` +
-				"Any other provider still works in-session, where pi's own model registry resolves it.",
-		};
+		// Any other provider is asked through pi, which holds its login — how a
+		// subscription such as openai-codex, with no API key, can verify.
+		return { provider, model, baseUrl: "", apiKey: "", remote: true, viaPi: true };
 	}
 
 	const apiKey = resolveApiKey(provider);
@@ -185,6 +184,7 @@ export function completerFor(ref: string, config: Config, signal?: AbortSignal):
 			throw new Error(reason);
 		};
 	}
+	if (endpoint.viaPi) return piCompleter(endpoint.provider, endpoint.model, { signal });
 	return chatCompleter({
 		baseUrl: endpoint.baseUrl,
 		model: endpoint.model,
