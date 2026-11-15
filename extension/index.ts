@@ -216,7 +216,7 @@ export default function (pi: ExtensionAPI) {
 		if (initialised) return;
 		cwd = ctx.cwd ?? process.cwd();
 		config = loadConfig(cwd);
-		storeFile = resolveStorePath(cwd);
+		storeFile = resolveStorePath(cwd, undefined, config.loop.queue);
 		initialised = true;
 	};
 

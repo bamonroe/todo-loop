@@ -213,6 +213,14 @@ test("an existing TODO.toml is adopted rather than shadowed", () => {
 	assert.equal(resolveStorePath(empty), path.join(empty, "todo.toml"));
 });
 
+test("[loop] queue picks the queue when a folder holds two", () => {
+	const dir = scratch();
+	fs.writeFileSync(path.join(dir, "todo.toml"), "");
+	assert.equal(resolveStorePath(dir, undefined, "todo.toml"), path.join(dir, "todo.toml"));
+	assert.equal(resolveStorePath(dir, undefined, ""), path.join(dir, "TODO.toml"), "blank adopts");
+	assert.equal(resolveStorePath(dir, "TODO.toml", "todo.toml"), path.join(dir, "TODO.toml"), "--file wins");
+});
+
 test("bookkeeping goes to the sidecar and never into the project's file", () => {
 	const dir = scratch();
 	const file = path.join(dir, "TODO.toml");

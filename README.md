@@ -78,7 +78,9 @@ The loop is only worth running on the backlog you actually keep, so it reads
 whichever of two schemas it finds rather than insisting on its own. With no
 `--file`, an existing `TODO.toml` or `todo.toml` in the working directory is
 adopted; `todo status` names the file, the schema and the state file it settled
-on, so a queue is never silently the wrong one.
+on, so a queue is never silently the wrong one. When a folder holds both — a project
+`TODO.toml` and the `todo.toml` an interview wrote beside it — set `[loop] queue`
+in `todoloop.toml` to the one to work; `--file` and `TODOLOOP_FILE` still win.
 
 |                        | native                     | project                                        |
 |------------------------|----------------------------|------------------------------------------------|

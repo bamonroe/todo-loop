@@ -305,9 +305,13 @@ export function depthOf(task: Task, tasks: Task[]): number {
  * a project with a `TODO.toml` quietly getting an empty `todo.toml` on the
  * first write, and a loop that reports the queue is empty while the real one
  * sits next to it.
+ *
+ * `configured` is `[loop] queue` from todoloop.toml: it names the queue when a
+ * folder holds two — the project's `TODO.toml` and the `todo.toml` an interview
+ * wrote beside it, say — which adoption alone would settle the other way.
  */
-export function resolveStorePath(cwd: string, file?: string): string {
-	const target = file ?? process.env.TODOLOOP_FILE;
+export function resolveStorePath(cwd: string, file?: string, configured?: string): string {
+	const target = file ?? process.env.TODOLOOP_FILE ?? (configured || undefined);
 	if (target) return path.isAbsolute(target) ? target : path.join(cwd, target);
 	for (const candidate of STORE_CANDIDATES) {
 		const full = path.join(cwd, candidate);

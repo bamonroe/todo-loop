@@ -89,6 +89,11 @@ max_iterations = 50
 # amount. Refusing to start costs one `git stash`; the alternative costs a
 # tangled history you find later.
 checkpoint = "require-clean"
+# The queue file, relative to this folder. Blank adopts an existing TODO.toml or
+# todo.toml, in that order; name one when the folder holds both, such as a
+# project TODO.toml beside the todo.toml an interview wrote. --file and
+# TODOLOOP_FILE override it.
+queue = ""
 commit_prefix = "todo"
 # A run that ends without calling todo_complete never advances the queue.
 # halt: stop and wait for a human. retry: re-issue the task in a fresh session,

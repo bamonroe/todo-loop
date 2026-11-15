@@ -195,6 +195,11 @@ export interface Config {
 		 * for the verifier too. Refusing to start is the cheap end of that.
 		 */
 		checkpoint: "commit" | "require-clean" | "off";
+		/**
+		 * The queue file, relative to the folder; blank adopts an existing
+		 * TODO.toml or todo.toml. --file and TODOLOOP_FILE override it.
+		 */
+		queue: string;
 		commit_prefix: string;
 		/** What to do when a run ends without the worker calling todo_complete. */
 		on_silent_stop: "halt" | "retry";
@@ -391,6 +396,7 @@ export const DEFAULT_CONFIG: Config = {
 		worker_timeout_ms: 0,
 		plan_timeout_ms: 0,
 		checkpoint: "require-clean",
+		queue: "",
 		commit_prefix: "todo",
 		on_silent_stop: "halt",
 	},
@@ -545,6 +551,7 @@ export function parseConfig(text: string): Config {
 			worker_timeout_ms: workerTimeout,
 			plan_timeout_ms: planTimeout,
 			checkpoint,
+			queue: pickString(loop, "queue", DEFAULT_CONFIG.loop.queue).trim(),
 			commit_prefix: pickString(loop, "commit_prefix", DEFAULT_CONFIG.loop.commit_prefix),
 			on_silent_stop,
 		},

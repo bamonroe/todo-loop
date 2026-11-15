@@ -140,7 +140,7 @@ function loadEnv(flags: Flags): Env {
 		str(flags, "provider") || undefined,
 		str(flags, "model") || undefined,
 	);
-	const storeFile = resolveStorePath(cwd, str(flags, "file") || undefined);
+	const storeFile = resolveStorePath(cwd, str(flags, "file") || undefined, config.loop.queue);
 	return { cwd, config, storeFile, store: loadStore(storeFile), evidenceFile: evidenceFilePath(cwd) };
 }
 
