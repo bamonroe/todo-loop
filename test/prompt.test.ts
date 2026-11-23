@@ -286,6 +286,10 @@ attempts = 0
 	assert.match(prompt, /This is a research act/);
 	assert.match(prompt, /NOTES\.md/);
 	assert.match(prompt, /A finding nobody writes down is a finding the next worker pays to rediscover/);
+	// AI desktop, 2026-11-15: three attempts each composed the whole inventory
+	// in reasoning, hit the output cap, and wrote nothing.
+	assert.match(prompt, /Write as you go/);
+	assert.match(prompt, /append each finding the moment you have it/);
 });
 
 /**
@@ -582,7 +586,7 @@ test("an act is told which resource is actually expensive", () => {
 	assert.match(prompt, /Calling a tool is one of the cheapest things/);
 	assert.match(prompt, /Nothing counts your calls/);
 	assert.match(prompt, /Look it up instead of recalling it/);
-	assert.match(prompt, /Do not draft code in your reasoning/);
+	assert.match(prompt, /Do not draft code or prose in your reasoning/);
 	assert.match(prompt, /Let the build settle what you cannot/);
 
 	// The distinction the worker got wrong: a big result is expensive, a call

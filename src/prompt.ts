@@ -524,7 +524,7 @@ function economicsBlock(): string {
 		"So:",
 		"",
 		"- **Look it up instead of recalling it.** If you are writing out a signature from memory, or arguing with yourself about whether some parameter exists, stop and ask the tool. You are spending the expensive resource to manufacture a guess, and the guess costs you a failed build later.",
-		"- **Do not draft code in your reasoning.** Write the file. Anything written twice is paid for twice, and only the copy in the file is ever compiled.",
+		"- **Do not draft code or prose in your reasoning.** Write the file. Anything written twice is paid for twice, and only the copy in the file is ever compiled or read. A turn has an output cap: a session that composes its whole answer in its head can hit it mid-thought and end with nothing written at all.",
 		"- **Let the build settle what you cannot.** When two approaches look equally good, build the smaller one and read what the compiler says. It answers in seconds and it is never wrong about your code; you can reason for ten minutes and still be guessing.",
 	].join("\n");
 }
@@ -619,6 +619,8 @@ export function renderActPrompt(store: Store, task: Task, options: PromptOptions
 			[
 				"## This is a research act",
 				`You are finding something out, not building. The deliverable is what you write into \`${options.memoryFile}\` — append a short, dated section with what you learned and, where it matters, the exact commands or paths that worked.`,
+				"",
+				`**Write as you go.** Start the section with its heading as soon as you begin, then append each finding the moment you have it — one fact, one edit. Never gather everything and compose the section at the end: a session that tries that can run out of output mid-thought and leave nothing, and an unwritten finding is lost with the session.`,
 				"",
 				"Write it for a session that has never seen this repository and cannot ask you anything. Facts and commands, not narration. A finding nobody writes down is a finding the next worker pays to rediscover.",
 				"Do not change anything else.",
