@@ -32,6 +32,10 @@ export interface RunTelemetry {
 	outputTokens: number;
 	/** A tool that started and never ended — what the worker was inside when it was stopped. */
 	inFlight?: { name: string; elapsedMs: number };
+	/** Why the last assistant message stopped: `toolUse`, `stop`, `length`, ... */
+	lastStopReason?: string;
+	/** Tokens the last assistant message generated. */
+	lastOutputTokens?: number;
 }
 
 /**
@@ -98,7 +102,26 @@ export function describeTelemetry(t: RunTelemetry): string {
 	if (t.contextTokens || t.outputTokens) parts.push(`${tokens(t.contextTokens)} context / ${tokens(t.outputTokens)} out`);
 	if (t.compactions) parts.push(`${t.compactions} compaction${t.compactions === 1 ? "" : "s"}`);
 	if (t.inFlight) parts.push(`still inside ${t.inFlight.name} after ${Math.round(t.inFlight.elapsedMs / 1000)}s`);
+	if (t.lastStopReason === "length") parts.push("last turn hit the output cap");
 	return parts.join(", ");
+}
+
+/**
+ * What a retry needs to hear when the session ended on the output cap.
+ *
+ * AI desktop, 2026-11-15: three attempts at one research act each spent their
+ * last turn composing the whole deliverable in reasoning, ~30,000 characters,
+ * hit the 8,192-token cap and ended with nothing written. The rejection said
+ * only "No file changes were made", so every retry repeated the attempt
+ * exactly. Saying *why* is the one thing that makes the next prompt differ.
+ */
+export function outputCapNote(t: RunTelemetry): string | undefined {
+	if (t.lastStopReason !== "length") return undefined;
+	const size = t.lastOutputTokens ? ` after generating ${t.lastOutputTokens} tokens` : "";
+	return (
+		`Your session ended because your last turn hit the model's output cap${size}, before it called a tool. ` +
+		"That turn's reasoning was lost. Do not compose the whole result in your head: write to the files as you go, one finding or one change at a time."
+	);
 }
 
 interface MonitorOptions {
@@ -283,7 +306,9 @@ export class SessionMonitor {
 		if (msg.usage) {
 			if (typeof msg.usage.input === "number") this.state.contextTokens = msg.usage.input;
 			if (typeof msg.usage.output === "number") this.state.outputTokens += msg.usage.output;
+			this.state.lastOutputTokens = typeof msg.usage.output === "number" ? msg.usage.output : undefined;
 		}
+		this.state.lastStopReason = (msg as { stopReason?: string }).stopReason;
 		if (!Array.isArray(msg.content)) return;
 		// Thinking is deliberately not echoed or kept: pi discards it between
 		// turns anyway, and it is far longer than the answer.

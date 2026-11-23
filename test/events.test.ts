@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { describeTelemetry, emptyTelemetry, SessionMonitor } from "../src/events.ts";
+import { describeTelemetry, emptyTelemetry, outputCapNote, SessionMonitor } from "../src/events.ts";
 
 /** A monitor with a clock we control and a log we can read back. */
 function monitor(start = 1_000): { m: SessionMonitor; lines: string[]; tick: (ms: number) => void } {
@@ -258,4 +258,30 @@ test("a text delta that merely mentions thinking_delta is not read as thinking",
 		}),
 	);
 	assert.equal(m.thinking, "");
+});
+
+test("a session that ended on the output cap says so, and why it matters", () => {
+	const { m } = monitor();
+	m.feed(assistant("looking", { input: 900, output: 300 }));
+	m.feed(
+		event({
+			type: "message_end",
+			message: { role: "assistant", content: [{ type: "thinking", thinking: "x".repeat(50) }], usage: { input: 1405, output: 8192 }, stopReason: "length" },
+		}),
+	);
+	const t = m.telemetry;
+	assert.equal(t.lastStopReason, "length");
+	assert.equal(t.lastOutputTokens, 8192);
+	assert.match(describeTelemetry(t), /last turn hit the output cap/);
+	const note = outputCapNote(t);
+	assert.ok(note);
+	assert.match(note, /after generating 8192 tokens/);
+	assert.match(note, /write to the files as you go/);
+});
+
+test("a session that ended normally carries no output-cap note", () => {
+	const { m } = monitor();
+	m.feed(event({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }], usage: { input: 1, output: 2 }, stopReason: "stop" } }));
+	assert.equal(outputCapNote(m.telemetry), undefined);
+	assert.doesNotMatch(describeTelemetry(m.telemetry), /output cap/);
 });

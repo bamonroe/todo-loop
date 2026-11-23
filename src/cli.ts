@@ -22,7 +22,7 @@ import {
 } from "./config.ts";
 import { diagnose, formatChecks } from "./doctor.ts";
 import { clockTime, describePhases, formatDuration, stampConsole } from "./clock.ts";
-import { describeTelemetry, emptyTelemetry, SessionMonitor, type RunTelemetry } from "./events.ts";
+import { describeTelemetry, emptyTelemetry, outputCapNote, SessionMonitor, type RunTelemetry } from "./events.ts";
 import {
 	commitAll,
 	dirtyPaths,
@@ -989,13 +989,17 @@ async function runLoop(
 		// with what landed in front of it, which is the whole design. Discarding
 		// three well-ordered items to retry from zero under identical conditions
 		// is how run 5 turned a productive round into a failed one.
-		const verdict = dryRun
+		const judged = dryRun
 			? { pass: true, reason: "dry run", finished: true }
 			: !result.timedOut
 				? await verifyTask(env, current)
 				: planning
 					? await timedOutRound(env, current, budgetMs)
 					: { pass: false, reason: `Worker exceeded its ${budgetMs}ms budget${cost ? ` (${cost})` : ""}.` };
+		// A rejection after a session that died on the output cap says so, or the
+		// retry is handed the same prompt and makes the same mistake.
+		const capNote = judged.pass ? undefined : outputCapNote(result.telemetry);
+		const verdict = capNote ? { ...judged, reason: `${judged.reason}\n${capNote}` } : judged;
 		// A timed-out act never reaches a verifier, so it has no verify phase to
 		// report — undefined rather than a misleading zero.
 		const verifyMs = result.timedOut && !planning ? undefined : Date.now() - attemptStarted - workerMs;
