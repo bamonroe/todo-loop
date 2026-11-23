@@ -43,6 +43,8 @@ interface Turn {
 	text: number;
 	/** Tools this turn asked for, in order. */
 	calls: string[];
+	/** Why the turn stopped; `length` is the output cap. */
+	stop?: string;
 }
 
 interface Usage {
@@ -63,6 +65,7 @@ interface Message {
 	content?: Block[];
 	usage?: Usage;
 	toolName?: string;
+	stopReason?: string;
 }
 
 function stamp(value: unknown): number {
@@ -124,6 +127,7 @@ function readSession(file: string): SessionCost | undefined {
 				thinking: blocks.reduce((sum, block) => sum + (block.thinking?.length ?? 0), 0),
 				text: blocks.reduce((sum, block) => sum + (block.text?.length ?? 0), 0),
 				calls: blocks.filter((block) => block.type === "toolCall").map((block) => block.name ?? "?"),
+				stop: message.stopReason,
 			});
 		} else if (message.role === "toolResult") {
 			cost.tool += gap;
@@ -190,6 +194,12 @@ console.log(
 	`thinking share: ${thinking + spoken > 0 ? ((thinking * 100) / (thinking + spoken)).toFixed(0) : "0"}% of generated characters`,
 );
 console.log(`decode rate: ${(output / Math.max(generation, 1)).toFixed(1)} tok/s, prefill included`);
+// A turn cut by the output cap loses everything it was composing. AI desktop
+// lost a research act three times this way, each a session's last turn.
+const capped = turns.filter((turn) => turn.stop === "length");
+console.log(
+	`output-cap stops: ${capped.length}${capped.length ? ` (sessions ${[...new Set(capped.map((turn) => turn.session))].join(", ")})` : ""}`,
+);
 
 // The tail, which is the whole reason this script exists. A turn that spends
 // minutes and asks for nothing is the shape the economics block is aimed at.
