@@ -890,3 +890,20 @@ test("nothing is recorded when no tool is named", async () => {
 		fs.rmSync(file, { force: true });
 	}
 });
+
+test("the memory file is read whole, never capped", async () => {
+	await run("todo-run");
+	const notes = `# Notes\n${"a finding worth keeping\n".repeat(300)}THE LAST FINDING`;
+	for (const call of [
+		{ toolName: "read", input: { path: "NOTES.md" } },
+		{ toolName: "bash", input: { command: 'cd "/somewhere" && cat NOTES.md' } },
+	]) {
+		const result = await h.emit("tool_result", { ...call, content: [{ type: "text", text: notes }] });
+		assert.equal(result, undefined, `${call.toolName} of the memory file must pass through untouched`);
+	}
+	// Anything else that long is still capped.
+	const other = (await h.emit("tool_result", { toolName: "read", input: { path: "src/big.ts" }, content: [{ type: "text", text: notes }] })) as {
+		content: { text: string }[];
+	};
+	assert.match(other.content[0].text, /output capped/);
+});

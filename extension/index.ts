@@ -16,7 +16,7 @@
 
 import { appendFileSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { uuidv7, type Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -78,6 +78,32 @@ import { verify, type Completer, type Verdict } from "../src/verify.ts";
 
 /** Tools whose output is bulky enough to be worth capping before it enters context. */
 const BULKY_TOOLS = new Set(["bash", "grep", "rg", "glob", "list", "read", "web_fetch"]);
+
+/**
+ * Whether a call reads the memory file whole: `read` on it, or a bash command
+ * that is only `cat` of it (optionally after a `cd`).
+ *
+ * The memory file is exempt from the output cap. It is the only memory the
+ * project has, so a worker handed part of it is handed a project with amnesia
+ * — and it will read it again and again trying to see the rest. AI desktop,
+ * 2026-11-15: a 4,020-byte NOTES.md under a 2,048-byte cap, read six times in
+ * one session.
+ */
+export function readsMemoryFile(toolName: string, input: Record<string, unknown> | undefined, cwd: string, memoryFile: string): boolean {
+	if (!memoryFile || !input) return false;
+	const target = resolve(cwd, memoryFile);
+	if (toolName === "read") {
+		const path = input.path ?? input.file_path;
+		return typeof path === "string" && resolve(cwd, path) === target;
+	}
+	if (toolName === "bash" && typeof input.command === "string") {
+		const command = input.command.trim().replace(/^cd\s+(?:"[^"]*"|'[^']*'|\S+)\s*&&\s*/, "");
+		const match = /^cat\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s*$/.exec(command);
+		const path = match && (match[1] ?? match[2] ?? match[3]);
+		return !!path && (resolve(cwd, path) === target || path === basename(memoryFile));
+	}
+	return false;
+}
 
 /**
  * How to split the budget between the two ends when a result is too big.
@@ -1059,7 +1085,8 @@ export default function (pi: ExtensionAPI) {
 		// budget is unspent still has to reach the verifier.
 		recordEvidence(event.toolName, text);
 		const max = config.context.tool_output_max_bytes;
-		const oversize = BULKY_TOOLS.has(event.toolName) && !!text && Buffer.byteLength(text, "utf8") > max;
+		const exempt = readsMemoryFile(event.toolName, event.input, cwd, config.plan.memory_file);
+		const oversize = !exempt && BULKY_TOOLS.has(event.toolName) && !!text && Buffer.byteLength(text, "utf8") > max;
 		if (!nudge && !oversize) return;
 
 		let body = text ?? "";
