@@ -317,11 +317,25 @@ whether an Android API can do something.
 
 ## 5. Next steps, in order
 
-1. Apply the §2 fixes: incremental writes for research acts, a rejection that
-   names a length stop, and a `doctor` warning on stale `tool_output_max_bytes`.
-   Then re-run `ai-desktop.integration-inventory` on the local worker.
-2. Add the spec analysis pass and EARS requirements to interrogate.
-3. Stand up SearXNG plus GPT Researcher, and trial it on the local Qwen as a
-   research-act tool against a question that really needs the web.
-4. Check whether pi can pass an Ollama JSON schema per call. If it can,
+Done 2026-11-23:
+
+- §2 fixes in todo-loop: research acts write each finding as they go
+  (`634e666`); a rejection after an output-cap stop says so (`f1f0fc0`); the
+  memory file is never capped on read (`7d20981`); the template's cap matches
+  the 8192 default and `todo doctor` flags a stale pin (`d36204c`);
+  `scripts/turn-cost.ts` counts output-cap stops.
+- §4.2 in interrogate (`de1088b`, local only, as that repo has no remote):
+  checkable requirements in EARS form, and a closing review that counts
+  contradictions, impossibilities and untestable answers as gaps.
+- A bench to measure all of it: `/side_hustle/sky-bench`, a sky almanac web
+  page. See its README.
+
+Still to do:
+
+1. Run the bench on the local worker and score it with `bench-report.sh`.
+2. Stand up SearXNG plus GPT Researcher, and trial it on the local Qwen as a
+   research-act tool against a question that really needs the web. The bench's
+   sun and moon algorithms are such a question.
+3. Check whether pi can pass an Ollama JSON schema per call. If it can,
    constrain verdicts first.
+4. A tool set per kind of act.
