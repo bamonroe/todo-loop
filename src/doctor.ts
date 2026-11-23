@@ -17,7 +17,7 @@ import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import { promisify } from "node:util";
 import type { Config } from "./config.ts";
-import { inheritsWorker, isLocalRef, piDefaultRef, reservedEnv, splitModelRef } from "./config.ts";
+import { DEFAULT_CONFIG, inheritsWorker, isLocalRef, piDefaultRef, reservedEnv, splitModelRef } from "./config.ts";
 import { dirtyPaths, isGitRepo, isTreeClean, loopOwnedPaths } from "./evidence.ts";
 import { endpointFor, piAuthProviders, REMOTE_PROVIDERS, type Endpoint } from "./providers.ts";
 import {
@@ -544,6 +544,27 @@ export function envChecks(config: Config, exists: (path: string) => boolean = fs
 }
 
 /**
+ * Caps a project pins below today's default.
+ *
+ * A project's todoloop.toml is copied from the template of its day and keeps
+ * that day's numbers after the default moves. AI desktop still pinned
+ * `tool_output_max_bytes = 2048` long after the default went to 8192 for
+ * handing workers 39% of their own files, and its research act paid for it.
+ */
+export function capChecks(config: Config): Check[] {
+	const pinned = config.context.tool_output_max_bytes;
+	const fallback = DEFAULT_CONFIG.context.tool_output_max_bytes;
+	if (pinned >= fallback) return [];
+	return [
+		{
+			level: "warn",
+			label: "tool output cap",
+			detail: `tool_output_max_bytes = ${pinned} is below the default ${fallback} — a stale pin from an older template? Workers get files cut short and re-read them; delete the line to take the default`,
+		},
+	];
+}
+
+/**
  * Acts carrying their own file budget.
  *
  * Visible on purpose. A per-task budget is a claim a planner made about work
@@ -631,6 +652,7 @@ export async function diagnose(options: DoctorOptions): Promise<Check[]> {
 	);
 
 	checks.push(...budgetChecks(store, config));
+	checks.push(...capChecks(config));
 	checks.push(...envChecks(config));
 
 	checks.push(...auditQueue(store, config.atomic.on_overflow));

@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 import { parseConfig } from "../src/config.ts";
-import { auditQueue, budgetChecks, envChecks, formatChecks, gitChecks, modelChecks, type Check } from "../src/doctor.ts";
+import { auditQueue, budgetChecks, capChecks, envChecks, formatChecks, gitChecks, modelChecks, type Check } from "../src/doctor.ts";
 import { parseStore } from "../src/store.ts";
 
 function levelOf(checks: Check[], label: string): string | undefined {
@@ -388,4 +388,13 @@ test("a verifier asked through pi needs pi to hold its login", () => {
 	});
 	assert.equal(levelOf(missing, "verifier model"), "fail");
 	assert.match(detailOf(missing, "verifier model") ?? "", /no credentials for anthropic/);
+});
+
+test("a tool output cap pinned below the default is flagged as stale", () => {
+	assert.deepEqual(capChecks(parseConfig("")), [], "the default is not a finding");
+	assert.deepEqual(capChecks(parseConfig("[context]\ntool_output_max_bytes = 20000\n")), [], "raising it is a choice");
+	const stale = capChecks(parseConfig("[context]\ntool_output_max_bytes = 2048\n"));
+	assert.equal(stale.length, 1);
+	assert.equal(stale[0].level, "warn");
+	assert.match(stale[0].detail, /2048 is below the default 8192/);
 });
