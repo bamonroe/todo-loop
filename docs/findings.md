@@ -280,6 +280,21 @@ smoke test — spent three attempts and ninety minutes producing nothing at all
 before promotion. The run's throughput problem is not rejection; it is that the
 local worker routinely cannot finish an act inside half an hour.
 
+## AI desktop, 2026-11-15: a research act that wrote nothing, three times
+
+`ai-desktop.integration-inventory`, a research act on the local worker
+(`ollama/default:buddy`, 8,192 output tokens a turn), blocked after three attempts,
+each rejected with "No file changes were made". Every attempt ended the same way:
+about fifteen minutes of short reads, then one turn of 29,000 to 31,000 characters
+of thinking, with no tool call, stopped by the output cap (`stopReason: "length"`).
+The model was composing the whole inventory in its reasoning before writing any of
+it. The rejection didn't say that, so each retry did the same thing again. The
+project also pinned `tool_output_max_bytes = 2048`, below today's 8192 default,
+so its 4 KB `NOTES.md` was cut on every read and re-read six times.
+
+The diagnosis, the fixes and the survey of other harnesses it prompted are in
+[`prior-art.md`](prior-art.md) §2.
+
 ## Still open
 
 - **The project description contradicts Android.** It says the app adjusts
