@@ -121,6 +121,12 @@ blockers have not shipped is skipped rather than handed out. See
 [Work the loop should not start yet](#work-the-loop-should-not-start-yet).
 
 `todo status` hides archived work; `todo status --all` includes it.
+`todo status --json` prints the same facts for a program to read rather than the tree:
+`tasks` (each with `id`, `title`, `status`, `depth`, `parent`, `level`, `kind`,
+`attempts`, `waiting_on`, `reason`, `not_yet_planned`, `too_coarse`, `archived`, and
+`text`, the tree line after the id), `counts`, `queue` (`file`, `schema`, `archive`,
+`state`), `loop` (`running`, `current`, `iterations`, `last_failure`) and `stuck`.
+Fields are only ever added, never renamed; Buddy's loop rooms read it.
 
 ## Work the loop should not start yet
 
@@ -648,7 +654,7 @@ matter most:
 ```
 todo init                      Write todoloop.toml and todo.toml starters
 todo doctor [--probe]          Check models, VRAM, git and queue shape
-todo status [--all]            Show the queue (--all includes archived work)
+todo status [--all] [--json]   Show the queue (--all includes archived work; --json for programs)
 todo stop                      Stop a running loop after the current task
 todo next [--id]               Print the next task's prompt (exit 3 when empty)
 todo start                     Claim the next task and print its prompt

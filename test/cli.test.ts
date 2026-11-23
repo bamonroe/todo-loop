@@ -59,6 +59,18 @@ test("add, status and next", async () => {
 	assert.match(status.stdout, /api: Build the API/);
 	assert.match(status.stdout, /3 todo/);
 
+	const json = JSON.parse((await todo("status", "--json")).stdout);
+	assert.deepEqual(
+		json.tasks.map((t: { id: string; depth: number; status: string }) => `${t.id}:${t.depth}:${t.status}`),
+		["api:0:todo", "api.health:1:todo", "api.metrics:1:todo"],
+	);
+	assert.equal(json.tasks[1].parent, "api");
+	assert.equal(json.tasks[0].text, "Build the API");
+	assert.equal(json.counts.todo, 3);
+	assert.equal(json.queue.file, "todo.toml");
+	assert.equal(json.loop.running, false);
+	assert.equal(json.stuck, false);
+
 	const next = await todo("next", "--id");
 	assert.equal(next.stdout.trim(), "api.health");
 

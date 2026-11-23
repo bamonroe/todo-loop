@@ -64,6 +64,7 @@ import {
 	nextReady,
 	recordFailure,
 	renderTree,
+	statusRows,
 	resolveStorePath,
 	rollup,
 	saveStore,
@@ -262,7 +263,7 @@ const USAGE = `todo — autonomous todo loop for pi
 
   todo init                      Write ${DEFAULT_CONFIG_FILE} and ${DEFAULT_STORE_FILE} starters
   todo doctor [--probe]          Check models, VRAM, git and queue shape
-  todo status [--all]            Show the queue (--all includes archived work)
+  todo status [--all] [--json]   Show the queue (--all includes archived work; --json for programs)
   todo stop                      Stop a running loop after the current task
   todo next [--id]               Print the next task's prompt (exit 3 when empty)
   todo start                     Claim the next task and print its prompt
@@ -332,6 +333,7 @@ function queueLine(env: Env): string {
 }
 
 function commandStatus(env: Env, flags: Flags): number {
+	if (bool(flags, "json")) return statusJson(env, flags);
 	const stats = counts(env.store);
 	const tree = renderTree(env.store, { all: bool(flags, "all") });
 	const waiting = blockedLeaves(env.store);
@@ -353,6 +355,44 @@ function commandStatus(env: Env, flags: Flags): number {
 			`\nnothing is runnable, but ${waiting.length} task(s) are only waiting on dependencies — the queue is stuck, not done.`,
 		);
 	}
+	return EXIT_OK;
+}
+
+/**
+ * `todo status --json`: the same facts as the tree, for a program to read
+ * (Buddy's loop rooms) instead of parsing the human view. Fields are added,
+ * never renamed: other tools depend on this shape.
+ */
+function statusJson(env: Env, flags: Flags): number {
+	const stats = counts(env.store);
+	const waiting = blockedLeaves(env.store);
+	const shown = (file?: string): string => (file ? path.relative(env.cwd, file) || file : "");
+	const out = {
+		tasks: statusRows(env.store, { all: bool(flags, "all") }),
+		counts: {
+			done: stats.done,
+			todo: stats.todo,
+			doing: stats.doing,
+			blocked: stats.blocked,
+			waiting: waiting.length,
+			pending_breakdowns: stats.pending_breakdowns,
+		},
+		queue: {
+			file: shown(env.storeFile),
+			schema: env.store.schema.name,
+			archive: shown(env.store.archive?.file),
+			state: shown(env.store.sidecarFile),
+			line: queueLine(env).replace(/^queue: /, ""),
+		},
+		loop: {
+			running: env.store.loop.running,
+			current: env.store.loop.current ?? "",
+			iterations: env.store.loop.iterations,
+			last_failure: env.store.loop.last_failure ?? "",
+		},
+		stuck: waiting.length > 0 && !nextReady(env.store),
+	};
+	console.log(JSON.stringify(out, null, 2));
 	return EXIT_OK;
 }
 

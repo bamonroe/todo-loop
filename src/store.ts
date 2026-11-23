@@ -1165,11 +1165,37 @@ export interface TreeOptions {
 	all?: boolean;
 }
 
-/** Indented one-line-per-task view for `todo status` and the /todo-status command. */
-export function renderTree(store: Store, options: TreeOptions = {}): string {
-	const marks: Record<TaskStatus, string> = { todo: "○", doing: "◐", done: "✓", blocked: "✗" };
-	const lines: string[] = [];
+/**
+ * One task as `todo status` shows it. The tree and `todo status --json` are both
+ * made from these, so the two can't say different things.
+ */
+export interface StatusRow {
+	id: string;
+	title: string;
+	status: TaskStatus;
+	/** How many parents up to the root: the tree's indent. */
+	depth: number;
+	parent: string;
+	/** `plan` or `act`. */
+	level: string;
+	/** `code`, `docs`, `research`, … */
+	kind: string;
+	attempts: number;
+	/** Unfinished tasks this one waits on. */
+	waiting_on: string[];
+	/** Why it is blocked, when it is. */
+	reason: string;
+	/** A plan not broken down yet. */
+	not_yet_planned: boolean;
+	/** It came back too big for one iteration. */
+	too_coarse: boolean;
+	archived: boolean;
+	/** The tree line after the id, its level tag and colon: the title and every note. */
+	text: string;
+}
 
+/** Every task `todo status` shows, in working order. */
+export function statusRows(store: Store, options: TreeOptions = {}): StatusRow[] {
 	const depth = (task: Task): number => {
 		let level = 0;
 		let cursor: Task | undefined = task;
@@ -1184,21 +1210,48 @@ export function renderTree(store: Store, options: TreeOptions = {}): string {
 		return level;
 	};
 
+	const rows: StatusRow[] = [];
 	for (const task of workingOrder(store)) {
 		if (task.archived && !options.all) continue;
-		const indent = "  ".repeat(depth(task));
-		const attempts = task.attempts > 0 && task.status !== "done" ? ` (${task.attempts} attempts)` : "";
-		const reason = task.status === "blocked" && task.reason ? ` — ${task.reason}` : "";
-		const level = levelOf(task) === "plan" ? " [plan]" : kindOf(task) === "code" ? "" : ` [${kindOf(task)}]`;
-		const pending = task.status !== "done" && needsPlanning(task, store.tasks) ? " — not yet planned" : "";
-		const over = task.overflowed ? " ⚠ too coarse" : "";
-		const shipped = task.archived ? " (archived)" : "";
+		const counted = task.attempts > 0 && task.status !== "done";
+		const blockedWhy = task.status === "blocked" && task.reason ? task.reason : "";
+		const unplanned = task.status !== "done" && needsPlanning(task, store.tasks);
 		const waiting = task.archived ? [] : unmetBlockers(task, store.tasks);
-		const gated = waiting.length ? ` — waiting on ${waiting.join(", ")}` : "";
-		lines.push(
-			`${indent}${marks[task.status]} ${task.id}${level}: ${task.title}${attempts}${pending}${gated}${reason}${over}${shipped}`,
-		);
+		const text =
+			task.title +
+			(counted ? ` (${task.attempts} attempts)` : "") +
+			(unplanned ? " — not yet planned" : "") +
+			(waiting.length ? ` — waiting on ${waiting.join(", ")}` : "") +
+			(blockedWhy ? ` — ${blockedWhy}` : "") +
+			(task.overflowed ? " ⚠ too coarse" : "") +
+			(task.archived ? " (archived)" : "");
+		rows.push({
+			id: task.id,
+			title: task.title,
+			status: task.status,
+			depth: depth(task),
+			parent: parentOf(task, store.tasks) ?? "",
+			level: levelOf(task),
+			kind: kindOf(task),
+			attempts: task.attempts,
+			waiting_on: waiting,
+			reason: blockedWhy,
+			not_yet_planned: unplanned,
+			too_coarse: Boolean(task.overflowed),
+			archived: Boolean(task.archived),
+			text,
+		});
 	}
+	return rows;
+}
 
-	return lines.join("\n");
+/** Indented one-line-per-task view for `todo status` and the /todo-status command. */
+export function renderTree(store: Store, options: TreeOptions = {}): string {
+	const marks: Record<TaskStatus, string> = { todo: "○", doing: "◐", done: "✓", blocked: "✗" };
+	return statusRows(store, options)
+		.map((row) => {
+			const tag = row.level === "plan" ? " [plan]" : row.kind === "code" ? "" : ` [${row.kind}]`;
+			return `${"  ".repeat(row.depth)}${marks[row.status]} ${row.id}${tag}: ${row.text}`;
+		})
+		.join("\n");
 }
