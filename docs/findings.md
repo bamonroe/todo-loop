@@ -369,6 +369,8 @@ The diagnosis, the fixes and the survey of other harnesses it prompted are in
   until `max_sendbacks` stopped it. Hand-fixed in the bench's baseline. Worth a
   check in interrogate: a value the spec says to hardcode, such as a time zone, is
   checked by running it, not by asking a model again.
-- **A `setsid nohup` job started from a Claude Code turn dies with the turn.**
-  The interview was cut twice that way. sky-bench now starts jobs as systemd user
-  units (`scripts/detach.sh`); `bin/todo-loop.sh` callers should do the same.
+- **Nothing stops two interviews writing one `interview.json`.** On sky-bench,
+  a Buddy room interview (machine mode, waiting since 2026-11-23) and two
+  `run --auto` resumes all had the file open; their answers interleaved. Worth a
+  lock file in interrogate, as todo-loop's queue has `[loop] running`. The bench
+  now starts jobs as named systemd units that refuse a second.
