@@ -358,3 +358,17 @@ The diagnosis, the fixes and the survey of other harnesses it prompted are in
 
 - **`thinking_keep_bytes` has never fired live.** It only acts past
   `prune_at_fraction` of the window, which no session has yet reached.
+
+- **An unattended interview on the local model wrote facts that don't exist.**
+  sky-bench's baseline interview (2026-11-28, `ollama/default:default` in every
+  role, 50 answers) recorded two IANA zones Node rejects, America/Quito and
+  Europe/Iceland, and Quito's latitude with the wrong sign. The respondent
+  "confirmed" America/Quito when the closing review flagged the zone, so the
+  check made it look settled. It also re-asked a settled question (Tromsø's
+  coordinates, Q35 and Q40), and the respondent sent every closing review back
+  until `max_sendbacks` stopped it. Hand-fixed in the bench's baseline. Worth a
+  check in interrogate: a value the spec says to hardcode, such as a time zone, is
+  checked by running it, not by asking a model again.
+- **A `setsid nohup` job started from a Claude Code turn dies with the turn.**
+  The interview was cut twice that way. sky-bench now starts jobs as systemd user
+  units (`scripts/detach.sh`); `bin/todo-loop.sh` callers should do the same.
